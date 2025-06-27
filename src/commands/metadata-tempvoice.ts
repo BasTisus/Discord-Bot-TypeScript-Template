@@ -30,7 +30,17 @@ export const TempVoiceCommandMetadata: {
     TEMPVOICE_LIST: {
         type: ApplicationCommandType.ChatInput,
         name: 'tempvoicelist',
-        description: 'Zeigt alle aktiven temporären Voice-Channels (Admin)',
+        description: 'Zeigt alle aktiven temporären Voice-Channels',
+        dm_permission: false,
+        default_member_permissions: PermissionsBitField.resolve([
+            PermissionFlagsBits.ManageChannels,
+        ]).toString(),
+        options: []
+    },
+    TEMPVOICE_CLEANUP: {
+        type: ApplicationCommandType.ChatInput,
+        name: 'tempvoicecleanup',
+        description: 'Führt manuellen Cleanup aller Temp-Channels durch (Admin)',
         dm_permission: false,
         default_member_permissions: PermissionsBitField.resolve([
             PermissionFlagsBits.ManageChannels,

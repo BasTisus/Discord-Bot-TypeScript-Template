@@ -16,7 +16,8 @@ import { ViewDateJoined } from './commands/user/index.js';
 import { 
     TempVoiceCreateSimpleCommand, 
     TempVoiceStatusSimpleCommand, 
-    TempVoiceListSimpleCommand 
+    TempVoiceListSimpleCommand,
+    TempVoiceCleanupSimpleCommand
 } from './commands/chat/tempvoice-simple.js';
 // TempVoice Metadata Import
 import { TempVoiceCommandMetadata } from './commands/metadata-tempvoice.js';
@@ -77,10 +78,11 @@ async function start(): Promise<void> {
         // User Context Commands
         new ViewDateJoined(),
 
-        // TempVoice Commands - Testing Version (3 Commands)
+        // TempVoice Commands - Testing Version (4 Commands)
         new TempVoiceCreateSimpleCommand(),
         new TempVoiceStatusSimpleCommand(), 
         new TempVoiceListSimpleCommand(),
+        new TempVoiceCleanupSimpleCommand(),
     ];
 
     // Buttons
