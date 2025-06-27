@@ -7,11 +7,11 @@
             "Guilds",
             "GuildMessages",
             "GuildMessageReactions",
+            "GuildVoiceStates",
             "DirectMessages",
             "DirectMessageReactions"
-            
         ],
-        "partials": ["Message", "Channel", "Reaction"],
+        "partials": ["Message", "Channel", "Reaction", "GuildMember"],
         "caches": {
             "AutoModerationRuleManager": 0,
             "BaseGuildEmojiManager": 0,
@@ -25,7 +25,22 @@
             "StageInstanceManager": 0,
             "ThreadManager": 0,
             "ThreadMemberManager": 0,
-            "VoiceStateManager": 0
+            "VoiceStateManager": 100
+        }
+    },
+    "tempvoice": {
+        "enabled": true,
+        "defaultMaxUsers": 5,
+        "cleanupInterval": 60000,
+        "extendedCleanupInterval": 600000,
+        "autoDeleteDelay": 1000,
+        "permissionUpdateDelay": 100,
+        "features": {
+            "activityLogging": true,
+            "statistics": true,
+            "adminCommands": true,
+            "rateLimitProtection": true,
+            "fallbackWithoutMongoDB": true
         }
     },
     "api": {

@@ -12,12 +12,14 @@ import {
 } from './commands/index.js';
 import { ViewDateSent } from './commands/message/index.js';
 import { ViewDateJoined } from './commands/user/index.js';
-// TempVoice Commands Import (Vereinfacht für Testing)
+// TempVoice Commands Import (Testing)
 import { 
     TempVoiceCreateSimpleCommand, 
     TempVoiceStatusSimpleCommand, 
     TempVoiceListSimpleCommand 
 } from './commands/chat/tempvoice-simple.js';
+// TempVoice Metadata Import
+import { TempVoiceCommandMetadata } from './commands/metadata-tempvoice.js';
 import {
     ButtonHandler,
     CommandHandler,
@@ -63,7 +65,7 @@ async function start(): Promise<void> {
 
     // Commands - Mit TempVoice Commands erweitert
     let commands: Command[] = [
-        // Chat Commands
+        // Original Template Commands
         new DevCommand(),
         new HelpCommand(),
         new InfoCommand(),
@@ -75,7 +77,7 @@ async function start(): Promise<void> {
         // User Context Commands
         new ViewDateJoined(),
 
-        // TempVoice Commands - Vereinfacht für Testing (3 Commands)
+        // TempVoice Commands - Testing Version (3 Commands)
         new TempVoiceCreateSimpleCommand(),
         new TempVoiceStatusSimpleCommand(), 
         new TempVoiceListSimpleCommand(),
@@ -136,6 +138,8 @@ async function start(): Promise<void> {
                 ...Object.values(ChatCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
                 ...Object.values(MessageCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
                 ...Object.values(UserCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
+                // TempVoice Commands für Registrierung
+                ...Object.values(TempVoiceCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
             ];
             await commandRegistrationService.process(localCmds, process.argv);
         } catch (error) {
@@ -154,7 +158,7 @@ process.on('SIGINT', async () => {
     Logger.info('🛑 Bot wird heruntergefahren...');
     try {
         // TempVoice Module cleanup
-        await tempVoiceModule.cleanup(null as any); // Client wird nicht für Cleanup benötigt
+        await tempVoiceModule.cleanup(null as any);
         Logger.info('✅ TempVoice Cleanup abgeschlossen');
     } catch (error) {
         Logger.error('❌ Fehler beim TempVoice Cleanup', error);
