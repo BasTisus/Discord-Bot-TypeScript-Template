@@ -12,6 +12,12 @@ import {
 } from './commands/index.js';
 import { ViewDateSent } from './commands/message/index.js';
 import { ViewDateJoined } from './commands/user/index.js';
+// TempVoice Commands Import (Vereinfacht für Testing)
+import { 
+    TempVoiceCreateSimpleCommand, 
+    TempVoiceStatusSimpleCommand, 
+    TempVoiceListSimpleCommand 
+} from './commands/chat/tempvoice-simple.js';
 import {
     ButtonHandler,
     CommandHandler,
@@ -32,6 +38,8 @@ import {
     Logger,
 } from './services/index.js';
 import { Trigger } from './triggers/index.js';
+// TempVoice Module Import
+import { tempVoiceModule } from './modules/tempvoice/index.js';
 
 const require = createRequire(import.meta.url);
 let Config = require('../config/config.json');
@@ -53,7 +61,7 @@ async function start(): Promise<void> {
         }),
     });
 
-    // Commands
+    // Commands - Mit TempVoice Commands erweitert
     let commands: Command[] = [
         // Chat Commands
         new DevCommand(),
@@ -67,7 +75,10 @@ async function start(): Promise<void> {
         // User Context Commands
         new ViewDateJoined(),
 
-        // TODO: Add new commands here
+        // TempVoice Commands - Vereinfacht für Testing (3 Commands)
+        new TempVoiceCreateSimpleCommand(),
+        new TempVoiceStatusSimpleCommand(), 
+        new TempVoiceListSimpleCommand(),
     ];
 
     // Buttons
@@ -112,6 +123,10 @@ async function start(): Promise<void> {
         new JobService(jobs)
     );
 
+    // TempVoice Module Initialization - WICHTIG!
+    // Initialisiere das TempVoice-Modul mit dem Client
+    tempVoiceModule.init(client);
+
     // Register
     if (process.argv[2] == 'commands') {
         try {
@@ -133,6 +148,19 @@ async function start(): Promise<void> {
 
     await bot.start();
 }
+
+// TempVoice Cleanup beim Shutdown
+process.on('SIGINT', async () => {
+    Logger.info('🛑 Bot wird heruntergefahren...');
+    try {
+        // TempVoice Module cleanup
+        await tempVoiceModule.cleanup(null as any); // Client wird nicht für Cleanup benötigt
+        Logger.info('✅ TempVoice Cleanup abgeschlossen');
+    } catch (error) {
+        Logger.error('❌ Fehler beim TempVoice Cleanup', error);
+    }
+    process.exit(0);
+});
 
 process.on('unhandledRejection', (reason, _promise) => {
     Logger.error(Logs.error.unhandledRejection, reason);
