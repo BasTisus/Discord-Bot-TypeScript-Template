@@ -1,5 +1,4 @@
-// src/modules/tempvoice/core.ts - Teil 5/8 Fortsetzung
-// Core TempVoice Module Functions
+// src/modules/tempvoice/cote.ts - Korrigierte Core TempVoice Module Functions
 
 import { 
     Guild,
@@ -9,7 +8,9 @@ import {
     ChannelType,
     PermissionFlagsBits,
     VoiceState,
-    Client
+    Client,
+    VoiceBasedChannel,
+    StageChannel
 } from 'discord.js';
 import { Logger } from '../../services/index.js';
 
@@ -43,7 +44,8 @@ interface ChannelStats {
     peakHours?: Array<{ hour: number; count: number }>;
 }
 
-export class TempVoiceCore {
+// Abstrakte Basisklasse für TempVoice Core
+export abstract class TempVoiceCore {
     // Core Channel Management Functions
     public async createTempChannel(
         guild: Guild, 
@@ -80,132 +82,70 @@ export class TempVoiceCore {
                 ]
             });
 
-            // Create text channel
-            const textChannel = await guild.channels.create({
-                name: `💬${channelName}`,
-                type: ChannelType.GuildText,
-                parent: creatorChannel.parent,
-                permissionOverwrites: [
-                    {
-                        id: guild.roles.everyone.id,
-                        deny: [PermissionFlagsBits.ViewChannel],
-                    },
-                    {
-                        id: member.id,
-                        allow: [
-                            PermissionFlagsBits.ViewChannel,
-                            PermissionFlagsBits.SendMessages,
-                            PermissionFlagsBits.ReadMessageHistory,
-                            PermissionFlagsBits.ManageMessages,
-                            PermissionFlagsBits.ManageChannels
-                        ],
-                    }
-                ]
-            });
+            // Create text channel if enabled
+            let textChannel: TextChannel | null = null;
+            if (config.createTextChannel !== false) {
+                textChannel = await guild.channels.create({
+                    name: `📝-${channelName.toLowerCase().replace(/\s+/g, '-')}`,
+                    type: ChannelType.GuildText,
+                    parent: creatorChannel.parent,
+                    permissionOverwrites: [
+                        {
+                            id: guild.roles.everyone.id,
+                            deny: [PermissionFlagsBits.ViewChannel],
+                        },
+                        {
+                            id: member.id,
+                            allow: [
+                                PermissionFlagsBits.ViewChannel,
+                                PermissionFlagsBits.SendMessages,
+                                PermissionFlagsBits.ReadMessageHistory,
+                                PermissionFlagsBits.ManageChannels,
+                                PermissionFlagsBits.ManageMessages
+                            ],
+                        }
+                    ]
+                });
+            }
 
             // Move member to new channel
-            await member.voice.setChannel(voiceChannel);
+            if (member.voice.channelId === creatorChannel.id) {
+                await member.voice.setChannel(voiceChannel);
+            }
 
             // Store channel data
-            const tempChannelData = {
+            const channelData = {
                 voiceChannelId: voiceChannel.id,
-                textChannelId: textChannel.id,
+                textChannelId: textChannel?.id || null,
                 ownerId: member.id,
                 ownerName: member.displayName,
-                maxUsers: config.defaultMaxUsers,
+                maxUsers: config.defaultMaxUsers || 0,
                 isVisible: true,
                 isLocked: false,
                 bannedUsers: [],
                 createdAt: new Date(),
                 guildId: guild.id,
-                activityLog: []
+                lastActivity: new Date(),
+                activityLog: [{
+                    activity: 'channel_created',
+                    userId: member.id,
+                    timestamp: new Date()
+                }]
             };
 
-            await this.setTempChannel(guild.id, voiceChannel.id, tempChannelData);
-            await this.updateTempChannelActivity(guild.id, voiceChannel.id, 'channel_created', member.id);
+            await this.setTempChannel(guild.id, voiceChannel.id, channelData);
 
-            Logger.info(`✅ Temp-Channel erstellt: ${channelName} für ${member.displayName} (${member.id})`);
-            return { voiceChannel, textChannel };
+            Logger.info(`TempVoice: Channel erstellt - ${voiceChannel.name} (${voiceChannel.id}) für ${member.displayName}`);
+
+            return { voiceChannel, textChannel: textChannel! };
         } catch (error) {
-            Logger.error('Fehler beim Erstellen des Temp-Channels', error);
+            Logger.error('Fehler beim Erstellen des TempVoice-Channels', error);
             return null;
         }
     }
 
-    public async deleteEmptyTempChannel(guild: Guild, channelId: string): Promise<boolean> {
-        try {
-            const tempChannelData = this.getTempChannel(guild.id, channelId);
-            if (!tempChannelData) return false;
-
-            // Delete voice channel
-            const voiceChannel = guild.channels.cache.get(channelId);
-            if (voiceChannel) {
-                await voiceChannel.delete('TempVoice: Channel leer - automatische Löschung');
-            }
-
-            // Delete text channel
-            const textChannel = guild.channels.cache.get(tempChannelData.textChannelId);
-            if (textChannel) {
-                await textChannel.delete('TempVoice: Voice-Channel gelöscht');
-            }
-
-            // Remove from database/memory
-            await this.deleteTempChannel(guild.id, channelId);
-            
-            Logger.info(`🗑️ Temp-Channel gelöscht: ${channelId} (leer)`);
-            return true;
-        } catch (error) {
-            Logger.error('Fehler beim Löschen des leeren Temp-Channels', error);
-            return false;
-        }
-    }
-
-    public async updateOwnerPermissions(
-        voiceChannel: VoiceChannel, 
-        textChannel: TextChannel, 
-        newOwner: GuildMember, 
-        oldOwnerId?: string
-    ): Promise<void> {
-        try {
-            // Remove old owner permissions
-            if (oldOwnerId) {
-                await voiceChannel.permissionOverwrites.delete(oldOwnerId);
-                if (textChannel) {
-                    await textChannel.permissionOverwrites.delete(oldOwnerId);
-                }
-            }
-
-            // Set new owner permissions
-            await voiceChannel.permissionOverwrites.create(newOwner, {
-                ViewChannel: true,
-                Connect: true,
-                Speak: true,
-                ManageChannels: true,
-                MoveMembers: true,
-                MuteMembers: true,
-                DeafenMembers: true
-            });
-
-            if (textChannel) {
-                await textChannel.permissionOverwrites.create(newOwner, {
-                    ViewChannel: true,
-                    SendMessages: true,
-                    ReadMessageHistory: true,
-                    ManageMessages: true,
-                    ManageChannels: true
-                });
-            }
-        } catch (error) {
-            Logger.error('Fehler beim Aktualisieren der Owner-Permissions', error);
-        }
-    }
-
-    // Voice State Update Handler
-    public async handleVoiceStateUpdate(
-        oldState: VoiceState, 
-        newState: VoiceState, 
-        client: Client
-    ): Promise<void> {
+    // Voice State Update Handler - korrigiert für VoiceBasedChannel
+    public async handleVoiceStateUpdate(oldState: VoiceState, newState: VoiceState, client: Client): Promise<void> {
         try {
             const member = newState.member || oldState.member;
             if (!member || member.user.bot) return;
@@ -215,101 +155,52 @@ export class TempVoiceCore {
 
             // User joined a voice channel
             if (!oldState.channel && newState.channel) {
-                await this.handleUserJoinedVoice(newState.channel, member, config);
+                await this.handleUserJoinedVoice(newState.channel as VoiceChannel, member, config);
             }
-
             // User left a voice channel
-            if (oldState.channel && !newState.channel) {
-                await this.handleUserLeftVoice(oldState.channel, member, client);
+            else if (oldState.channel && !newState.channel) {
+                await this.handleUserLeftVoice(oldState.channel as VoiceChannel, member, client);
             }
-
             // User moved between channels
-            if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
-                await this.handleUserLeftVoice(oldState.channel, member, client);
-                await this.handleUserJoinedVoice(newState.channel, member, config);
+            else if (oldState.channel && newState.channel && oldState.channel.id !== newState.channel.id) {
+                await this.handleUserLeftVoice(oldState.channel as VoiceChannel, member, client);
+                await this.handleUserJoinedVoice(newState.channel as VoiceChannel, member, config);
             }
-
-            // Update text channel permissions for temp channels
-            await this.updateTextChannelPermissions(oldState, newState);
-
         } catch (error) {
-            Logger.error('Fehler im VoiceStateUpdate Handler', error);
+            Logger.error('Fehler beim Verarbeiten des Voice State Updates', error);
         }
     }
 
-    private async handleUserJoinedVoice(
-        channel: VoiceChannel, 
-        member: GuildMember, 
-        config: any
-    ): Promise<void> {
-        // Check if this is a creator channel
-        if (config.creatorChannels.includes(channel.id)) {
-            await this.createTempChannel(channel.guild, member, channel, config);
-            return;
-        }
-
-        // Update activity for temp channels
-        const tempChannelData = this.getTempChannel(channel.guild.id, channel.id);
-        if (tempChannelData) {
-            await this.updateTempChannelActivity(
-                channel.guild.id, 
-                channel.id, 
-                'user_joined', 
-                member.id
-            );
-        }
-    }
-
-    private async handleUserLeftVoice(
-        channel: VoiceChannel, 
-        member: GuildMember, 
-        client: Client
-    ): Promise<void> {
-        const tempChannelData = this.getTempChannel(channel.guild.id, channel.id);
-        if (!tempChannelData) return;
-
-        // Log user left
-        await this.updateTempChannelActivity(
-            channel.guild.id, 
-            channel.id, 
-            'user_left', 
-            member.id
-        );
-
-        // Check if channel is now empty
-        if (channel.members.size === 0) {
-            await this.deleteEmptyTempChannel(channel.guild, channel.id);
-        }
-    }
-
-    private async updateTextChannelPermissions(
-        oldState: VoiceState, 
-        newState: VoiceState
-    ): Promise<void> {
+    // User joined a voice channel - korrigierte Typisierung
+    private async handleUserJoinedVoice(channel: VoiceChannel, member: GuildMember, config: any): Promise<void> {
         try {
-            const member = newState.member || oldState.member;
-            if (!member) return;
-
-            // Handle old channel text permissions
-            if (oldState.channel) {
-                const oldTempData = this.getTempChannel(oldState.guild.id, oldState.channel.id);
-                if (oldTempData) {
-                    const textChannel = oldState.guild.channels.cache.get(oldTempData.textChannelId) as TextChannel;
-                    if (textChannel && !oldState.channel.members.has(member.id)) {
-                        // Remove text channel access if user is no longer in voice
-                        await textChannel.permissionOverwrites.delete(member.id);
-                    }
+            // Check if this is a creator channel
+            if (config.creatorChannels?.includes(channel.id)) {
+                const result = await this.createTempChannel(channel.guild, member, channel, config);
+                if (result) {
+                    Logger.info(`TempVoice: Neuer Channel für ${member.displayName} erstellt`);
                 }
+                return;
             }
 
-            // Handle new channel text permissions
-            if (newState.channel) {
-                const newTempData = this.getTempChannel(newState.guild.id, newState.channel.id);
-                if (newTempData) {
-                    const textChannel = newState.guild.channels.cache.get(newTempData.textChannelId) as TextChannel;
+            // Check if this is a temp channel
+            const tempChannelData = this.getTempChannel(channel.guild.id, channel.id);
+            if (tempChannelData) {
+                // Update last activity
+                tempChannelData.lastActivity = new Date();
+                tempChannelData.activityLog?.push({
+                    activity: 'user_joined',
+                    userId: member.id,
+                    timestamp: new Date()
+                });
+
+                await this.setTempChannel(channel.guild.id, channel.id, tempChannelData);
+
+                // Give text channel access if exists
+                if (tempChannelData.textChannelId) {
+                    const textChannel = channel.guild.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
                     if (textChannel) {
-                        // Grant text channel access to voice members
-                        await textChannel.permissionOverwrites.create(member, {
+                        await textChannel.permissionOverwrites.edit(member.id, {
                             ViewChannel: true,
                             SendMessages: true,
                             ReadMessageHistory: true
@@ -318,131 +209,166 @@ export class TempVoiceCore {
                 }
             }
         } catch (error) {
-            Logger.error('Fehler beim Aktualisieren der Text-Channel Permissions', error);
+            Logger.error('Fehler beim Verarbeiten des Channel-Beitritts', error);
         }
     }
 
-    // Activity Logging
-    public async updateTempChannelActivity(
-        guildId: string, 
-        channelId: string, 
-        activity: string, 
-        userId: string,
-        metadata?: any
-    ): Promise<void> {
+    // User left a voice channel - korrigierte Typisierung
+    private async handleUserLeftVoice(channel: VoiceChannel, member: GuildMember, client: Client): Promise<void> {
         try {
-            const tempChannelData = this.getTempChannel(guildId, channelId);
+            const tempChannelData = this.getTempChannel(channel.guild.id, channel.id);
             if (!tempChannelData) return;
 
-            if (!tempChannelData.activityLog) {
-                tempChannelData.activityLog = [];
+            // Update activity log
+            tempChannelData.lastActivity = new Date();
+            tempChannelData.activityLog?.push({
+                activity: 'user_left',
+                userId: member.id,
+                timestamp: new Date()
+            });
+
+            await this.setTempChannel(channel.guild.id, channel.id, tempChannelData);
+
+            // Remove text channel access
+            if (tempChannelData.textChannelId) {
+                const textChannel = channel.guild.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
+                if (textChannel) {
+                    await textChannel.permissionOverwrites.delete(member.id);
+                }
             }
 
-            const activityEntry: ActivityLog = {
-                timestamp: new Date(),
-                activity,
-                userId,
-                metadata
-            };
-
-            tempChannelData.activityLog.push(activityEntry);
-
-            // Keep only last 50 activities
-            if (tempChannelData.activityLog.length > 50) {
-                tempChannelData.activityLog = tempChannelData.activityLog.slice(-50);
+            // Check if channel is empty
+            if (channel.members.size === 0) {
+                Logger.info(`TempVoice: Leerer Channel erkannt - ${channel.name} (${channel.id})`);
+                await this.deleteEmptyTempChannel(channel.guild, channel.id);
             }
+            // Transfer ownership if owner left but channel not empty
+            else if (tempChannelData.ownerId === member.id) {
+                const newOwner = channel.members.first();
+                if (newOwner && !newOwner.user.bot) {
+                    tempChannelData.ownerId = newOwner.id;
+                    tempChannelData.ownerName = newOwner.displayName;
+                    tempChannelData.activityLog?.push({
+                        activity: 'ownership_transferred',
+                        userId: newOwner.id,
+                        timestamp: new Date()
+                    });
 
-            await this.setTempChannel(guildId, channelId, tempChannelData);
+                    await this.setTempChannel(channel.guild.id, channel.id, tempChannelData);
+
+                    // Update channel permissions for new owner
+                    await channel.permissionOverwrites.edit(newOwner.id, {
+                        ManageChannels: true,
+                        MoveMembers: true,
+                        MuteMembers: true,
+                        DeafenMembers: true
+                    });
+
+                    Logger.info(`TempVoice: Besitzer übertragen - ${channel.name} → ${newOwner.displayName}`);
+                }
+            }
         } catch (error) {
-            Logger.error('Fehler beim Aktualisieren der Channel-Aktivität', error);
+            Logger.error('Fehler beim Verarbeiten des Channel-Verlassens', error);
         }
     }
 
-    public async getChannelActivity(
-        guildId: string, 
-        channelId: string, 
-        limit: number = 10
-    ): Promise<ActivityLog[]> {
+    // Delete empty temp channel
+    public async deleteEmptyTempChannel(guild: Guild, channelId: string): Promise<boolean> {
         try {
-            const tempChannelData = this.getTempChannel(guildId, channelId);
-            if (!tempChannelData || !tempChannelData.activityLog) return [];
+            const tempChannelData = this.getTempChannel(guild.id, channelId);
+            if (!tempChannelData) return false;
 
-            return tempChannelData.activityLog
-                .slice(-limit)
-                .reverse();
+            // Delete voice channel
+            const voiceChannel = guild.channels.cache.get(channelId);
+            if (voiceChannel) {
+                await voiceChannel.delete('TempVoice: Channel ist leer');
+            }
+
+            // Delete text channel if exists
+            if (tempChannelData.textChannelId) {
+                const textChannel = guild.channels.cache.get(tempChannelData.textChannelId);
+                if (textChannel) {
+                    await textChannel.delete('TempVoice: Voice-Channel gelöscht');
+                }
+            }
+
+            // Remove from storage
+            await this.deleteTempChannel(guild.id, channelId);
+
+            Logger.info(`TempVoice: Channel gelöscht - ${channelId}`);
+            return true;
         } catch (error) {
-            Logger.error('Fehler beim Abrufen der Channel-Aktivität', error);
-            return [];
+            Logger.error('Fehler beim Löschen des leeren Channels', error);
+            return false;
         }
     }
 
-    // Statistics Functions
-    public async getDetailedStats(guildId: string, timeframe: string = 'all'): Promise<ChannelStats> {
+    // Get detailed statistics
+    public async getDetailedStats(guildId: string, timeframe?: string): Promise<ChannelStats> {
         try {
             const allChannels = await this.getAllTempChannels(guildId);
             const now = new Date();
-            let timeframeCutoff = new Date(0);
+            let timeframeStart = new Date(0); // Default: all time
 
-            // Calculate timeframe cutoff
             switch (timeframe) {
                 case 'today':
-                    timeframeCutoff = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+                    timeframeStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
                     break;
                 case 'week':
-                    timeframeCutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+                    timeframeStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
                     break;
                 case 'month':
-                    timeframeCutoff = new Date(now.getFullYear(), now.getMonth(), 1);
+                    timeframeStart = new Date(now.getFullYear(), now.getMonth(), 1);
                     break;
-                default:
-                    timeframeCutoff = new Date(0);
             }
 
-            const channelsInTimeframe = allChannels.filter(
-                channel => channel.createdAt >= timeframeCutoff
+            const channelsInTimeframe = allChannels.filter(ch => 
+                new Date(ch.createdAt) >= timeframeStart
             );
 
             // Calculate statistics
-            const activeChannels = allChannels.filter(channel => {
-                // This would need to be checked against actual Discord channels
-                return true; // Placeholder
-            }).length;
+            const totalLifetime = allChannels.reduce((sum, ch) => {
+                const lifetime = (ch.lastActivity ? new Date(ch.lastActivity) : now).getTime() - new Date(ch.createdAt).getTime();
+                return sum + lifetime;
+            }, 0);
 
-            const totalLifetime = allChannels.reduce(
-                (sum, channel) => sum + (now.getTime() - channel.createdAt.getTime()), 0
-            );
-            const avgChannelLifetime = allChannels.length > 0 ? totalLifetime / allChannels.length : 0;
+            const avgLifetime = allChannels.length > 0 ? totalLifetime / allChannels.length : 0;
 
-            // Count activities
-            let totalBans = 0, totalKicks = 0, totalClaims = 0;
-            let totalNameChanges = 0, totalLimitChanges = 0;
-            let totalLockChanges = 0, totalVisibilityChanges = 0;
+            // Count activities from logs
+            let totalBans = 0;
+            let totalKicks = 0;
+            let totalClaims = 0;
+            let totalNameChanges = 0;
+            let totalLimitChanges = 0;
+            let totalLockChanges = 0;
+            let totalVisibilityChanges = 0;
 
             const ownerCounts = new Map<string, number>();
 
-            allChannels.forEach(channel => {
+            for (const channel of allChannels) {
                 // Count owner occurrences
-                const currentCount = ownerCounts.get(channel.ownerName) || 0;
-                ownerCounts.set(channel.ownerName, currentCount + 1);
+                const ownerName = channel.ownerName || 'Unknown';
+                ownerCounts.set(ownerName, (ownerCounts.get(ownerName) || 0) + 1);
 
                 // Count activities
                 if (channel.activityLog) {
-                    channel.activityLog.forEach(log => {
+                    for (const log of channel.activityLog) {
                         switch (log.activity) {
                             case 'user_banned': totalBans++; break;
                             case 'user_kicked': totalKicks++; break;
                             case 'channel_claimed': totalClaims++; break;
-                            case 'name_changed': totalNameChanges++; break;
+                            case 'channel_renamed': totalNameChanges++; break;
                             case 'limit_changed': totalLimitChanges++; break;
                             case 'channel_locked':
                             case 'channel_unlocked': totalLockChanges++; break;
                             case 'channel_hidden':
                             case 'channel_shown': totalVisibilityChanges++; break;
                         }
-                    });
+                    }
                 }
-            });
+            }
 
+            // Top owners
             const topOwners = Array.from(ownerCounts.entries())
                 .map(([ownerName, count]) => ({ ownerName, count }))
                 .sort((a, b) => b.count - a.count)
@@ -450,11 +376,14 @@ export class TempVoiceCore {
 
             const stats: ChannelStats = {
                 totalChannels: allChannels.length,
-                activeChannels,
+                activeChannels: allChannels.filter(ch => {
+                    const lastActivity = ch.lastActivity ? new Date(ch.lastActivity) : new Date(ch.createdAt);
+                    return now.getTime() - lastActivity.getTime() < 30 * 60 * 1000; // Active if used in last 30 min
+                }).length,
                 channelsInTimeframe: channelsInTimeframe.length,
-                memoryChannels: allChannels.length, // In memory mode
-                avgChannelLifetime,
-                avgUsersPerChannel: 2.5, // Placeholder
+                memoryChannels: allChannels.length, // All are in memory
+                avgChannelLifetime: Math.round(avgLifetime / 1000 / 60), // in minutes
+                avgUsersPerChannel: 2.5, // Would need to be calculated from actual data
                 totalBans,
                 totalKicks,
                 totalClaims,
@@ -476,7 +405,7 @@ export class TempVoiceCore {
         }
     }
 
-    // Abstract methods (to be implemented by specific storage implementations)
+    // Abstract methods - müssen von Implementierungen überschrieben werden
     protected abstract getTempChannel(guildId: string, channelId: string): any;
     protected abstract setTempChannel(guildId: string, channelId: string, data: any): Promise<void>;
     protected abstract deleteTempChannel(guildId: string, channelId: string): Promise<void>;

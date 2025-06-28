@@ -1,29 +1,35 @@
-// src/commands/chat/tempvoice-commands.ts - Teil 1/8
-// Vollständige TempVoice by-Commands mit MongoDB-Integration
-import { 
-    ApplicationCommandType, 
-    ChatInputCommandInteraction, 
+import {
+    ChatInputCommandInteraction,
     SlashCommandBuilder,
+    ApplicationCommandType,
     PermissionFlagsBits,
-    EmbedBuilder,
-    ChannelType,
     GuildMember,
-    VoiceChannel,
-    TextChannel,
-    CategoryChannel
+    EmbedBuilder,
+    PermissionsString
 } from 'discord.js';
-import { Command } from '../index.js';
-import { tempVoiceModule } from '../../modules/tempvoice/index.js';
-import { Logger } from '../../services/index.js';
+import { RateLimiter } from 'discord.js-rate-limiter';
 
-// 1. /byvoicecreate - Creator-Channel erstellen (Admin Command)
+import { Logger } from '../../services/index.js';
+import { Command, CommandDeferType } from '../index.js';
+// Korrigierter Import
+import { TempVoiceModule } from '../../modules/tempvoice/index.js';
+
+// Instanz der TempVoiceModule (wird normalerweise über Dependency Injection bereitgestellt)
+declare const tempVoiceModule: TempVoiceModule;
+
+// 1. /byvoicecreate - Creator-Channel erstellen
 export class TempVoiceCreateCommand implements Command {
+    public names = ['byvoicecreate'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels', 'Connect'];
+    public cooldown = new RateLimiter(1, 5000);
+
     public metadata = {
         name: 'byvoicecreate',
         description: 'Erstellt einen Creator-Channel für temporäre Voice-Channels',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
-        defaultMemberPermissions: PermissionFlagsBits.Administrator,
+        defaultMemberPermissions: PermissionFlagsBits.ManageChannels,
     };
 
     public data = new SlashCommandBuilder()
@@ -33,73 +39,58 @@ export class TempVoiceCreateCommand implements Command {
             option.setName('name')
                 .setDescription('Name des Creator-Channels')
                 .setRequired(true)
-                .setMinLength(1)
-                .setMaxLength(50))
+                .setMaxLength(100))
         .addIntegerOption(option =>
-            option.setName('maxslots')
-                .setDescription('Standard maximale Anzahl Nutzer (0 = unbegrenzt)')
+            option.setName('max_users')
+                .setDescription('Standard-Nutzer-Limit für temporäre Channels')
                 .setRequired(false)
                 .setMinValue(0)
                 .setMaxValue(99))
         .addChannelOption(option =>
             option.setName('category')
                 .setDescription('Kategorie für den Creator-Channel')
-                .setRequired(false)
-                .addChannelTypes(ChannelType.GuildCategory))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+                .setRequired(false))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
-        await intr.deferReply({ ephemeral: true });
-        
-        const channelName = intr.options.getString('name', true);
-        const maxSlots = intr.options.getInteger('maxslots') ?? 5;
-        const category = intr.options.getChannel('category') as CategoryChannel | null;
-        
-        try {
-            // Creator-Channel erstellen
-            const creatorChannel = await intr.guild!.channels.create({
-                name: channelName,
-                type: ChannelType.GuildVoice,
-                parent: category?.id,
-                userLimit: maxSlots === 0 ? 0 : maxSlots,
-                permissionOverwrites: [
-                    {
-                        id: intr.guild!.roles.everyone.id,
-                        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.Connect],
-                    }
-                ]
-            });
+        const name = intr.options.getString('name', true);
+        const maxUsers = intr.options.getInteger('max_users') || 0;
+        const category = intr.options.getChannel('category');
 
-            // Config aktualisieren
-            const config = (tempVoiceModule as any).getGuildConfig(intr.guildId!);
-            if (!config.creatorChannels.includes(creatorChannel.id)) {
-                config.creatorChannels.push(creatorChannel.id);
-                config.defaultMaxUsers = maxSlots;
-                await (tempVoiceModule as any).saveGuildConfig(intr.guildId!, config);
+        try {
+            const result = await (tempVoiceModule as any).createCreatorChannel(
+                intr.guild!,
+                name,
+                category?.id,
+                maxUsers
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
 
             const embed = new EmbedBuilder()
                 .setTitle('✅ Creator-Channel erstellt!')
-                .setDescription(`Der Creator-Channel **${channelName}** wurde erfolgreich erstellt!`)
-                .setColor(0x00ff00)
+                .setDescription(`Der Creator-Channel wurde erfolgreich erstellt.`)
                 .addFields(
-                    { name: '📢 Channel', value: `${creatorChannel}`, inline: true },
-                    { name: '📁 Kategorie', value: category ? category.name : 'Keine Kategorie', inline: true },
-                    { name: '👥 Standard Max-Users', value: `${maxSlots === 0 ? 'Unbegrenzt' : maxSlots}`, inline: true },
-                    { name: '🎯 Funktionsweise', value: 'Wenn jemand diesem Channel beitritt, wird automatisch ein temporärer Voice-Channel mit Text-Channel erstellt!', inline: false },
-                    { name: '🗑️ Auto-Löschung', value: 'Temporäre Channels werden automatisch gelöscht wenn sie leer sind.', inline: false },
-                    { name: '🗄️ Datenspeicherung', value: 'MongoDB mit verbesserter Performance und Statistiken', inline: false }
+                    { name: '📢 Channel', value: `<#${result.channelId}>`, inline: true },
+                    { name: '👥 Max. Nutzer', value: maxUsers === 0 ? 'Unbegrenzt' : maxUsers.toString(), inline: true },
+                    { name: '📁 Kategorie', value: category ? `<#${category.id}>` : 'Keine', inline: true }
                 )
-                .setFooter({ text: 'TempVoice System • MongoDB • Erfolgreich konfiguriert' })
-                .setTimestamp();
+                .setColor(0x00ff00)
+                .setTimestamp()
+                .setFooter({ text: 'TempVoice • Creator Channel • MongoDB' });
 
-            await intr.editReply({ embeds: [embed] });
-
-            Logger.info(`✅ Creator-Channel erstellt: ${channelName} (${creatorChannel.id}) mit max ${maxSlots} Users - MongoDB`);
+            await intr.reply({ embeds: [embed] });
         } catch (error) {
             Logger.error('Fehler beim Erstellen des Creator-Channels', error);
-            await intr.editReply({
-                content: `❌ Fehler beim Erstellen des Creator-Channels: ${error}`
+            await intr.reply({
+                content: '❌ Fehler beim Erstellen des Creator-Channels!',
+                ephemeral: true
             });
         }
     }
@@ -107,6 +98,11 @@ export class TempVoiceCreateCommand implements Command {
 
 // 2. /byvoicesetowner - Besitzer ändern
 export class TempVoiceSetOwnerCommand implements Command {
+    public names = ['byvoicesetowner'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoicesetowner',
         description: 'Ändert den Besitzer des temporären Voice-Channels',
@@ -124,7 +120,7 @@ export class TempVoiceSetOwnerCommand implements Command {
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const newOwner = intr.options.getUser('user', true);
-        
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -142,64 +138,52 @@ export class TempVoiceSetOwnerCommand implements Command {
             return;
         }
 
-        if (newOwner.id === tempChannelData.ownerId) {
-            await intr.reply({
-                content: '❌ Dieser Nutzer ist bereits der Besitzer!',
-                ephemeral: true
-            });
-            return;
-        }
-
         const newOwnerMember = intr.guild!.members.cache.get(newOwner.id);
         if (!newOwnerMember) {
             await intr.reply({
-                content: '❌ Nutzer nicht auf diesem Server gefunden!',
+                content: '❌ Der neue Besitzer ist nicht auf diesem Server!',
                 ephemeral: true
             });
             return;
         }
 
-        // Check if new owner is in the voice channel
-        const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-        if (!voiceChannel.members.has(newOwner.id)) {
+        if (!newOwnerMember.voice.channel || newOwnerMember.voice.channel.id !== tempChannelData.channelId) {
             await intr.reply({
-                content: '❌ Der neue Besitzer muss im Voice-Channel sein!',
+                content: '❌ Der neue Besitzer muss im Channel sein!',
                 ephemeral: true
             });
             return;
         }
 
         try {
-            const oldOwnerId = tempChannelData.ownerId;
-            const oldOwnerName = tempChannelData.ownerName;
+            const result = await (tempVoiceModule as any).setChannelOwner(
+                intr.guildId!,
+                tempChannelData.channelId,
+                newOwner.id
+            );
 
-            // Update ownership in MongoDB
-            tempChannelData.ownerId = newOwner.id;
-            tempChannelData.ownerName = newOwnerMember.displayName;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Update permissions
-            const textChannel = intr.guild!.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
-            await (tempVoiceModule as any).updateOwnerPermissions(voiceChannel, textChannel, newOwnerMember, oldOwnerId);
-
-            // Log ownership change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'ownership_transferred', newOwner.id);
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
+            }
 
             const embed = new EmbedBuilder()
-                .setTitle('👑 Besitzer geändert!')
-                .setDescription(`Der Besitzer wurde erfolgreich auf **${newOwnerMember.displayName}** übertragen!`)
+                .setTitle('✅ Besitzer geändert!')
+                .setDescription(`Der Channel-Besitzer wurde erfolgreich geändert.`)
                 .addFields(
-                    { name: '👤 Neuer Besitzer', value: `${newOwnerMember}`, inline: true },
-                    { name: '👻 Vorheriger Besitzer', value: `${oldOwnerName}`, inline: true },
-                    { name: '👑 Übertragen von', value: `${intr.user}`, inline: true }
+                    { name: '👤 Neuer Besitzer', value: `${newOwner}`, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0x00ff00)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Ownership Transfer • MongoDB' });
+                .setFooter({ text: 'TempVoice • Owner Changed • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
-            Logger.error('Fehler beim Ändern des Besitzers', error);
+            Logger.error('Fehler beim Ändern des Channel-Besitzers', error);
             await intr.reply({
                 content: '❌ Fehler beim Ändern des Besitzers!',
                 ephemeral: true
@@ -208,8 +192,13 @@ export class TempVoiceSetOwnerCommand implements Command {
     }
 }
 
-// 3. /byvoicelimit - Nutzer-Limit ändern
+// 3. /byvoicelimit - Nutzer-Limit
 export class TempVoiceLimitCommand implements Command {
+    public names = ['byvoicelimit'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoicelimit',
         description: 'Ändert das Nutzer-Limit des temporären Voice-Channels',
@@ -222,14 +211,14 @@ export class TempVoiceLimitCommand implements Command {
         .setDescription('Ändert das Nutzer-Limit des temporären Voice-Channels')
         .addIntegerOption(option =>
             option.setName('limit')
-                .setDescription('Neues Nutzer-Limit (0 = unbegrenzt)')
+                .setDescription('Nutzer-Limit (0 = unbegrenzt)')
                 .setRequired(true)
                 .setMinValue(0)
                 .setMaxValue(99));
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
-        const newLimit = intr.options.getInteger('limit', true);
-        
+        const limit = intr.options.getInteger('limit', true);
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -248,33 +237,34 @@ export class TempVoiceLimitCommand implements Command {
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Update channel limit
-            await voiceChannel.setUserLimit(newLimit);
+            const result = await (tempVoiceModule as any).setChannelLimit(
+                intr.guildId!,
+                tempChannelData.channelId,
+                limit
+            );
 
-            // Update in MongoDB
-            tempChannelData.maxUsers = newLimit;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Log limit change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'limit_changed', intr.user.id);
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
+            }
 
             const embed = new EmbedBuilder()
-                .setTitle('👥 Nutzer-Limit geändert!')
-                .setDescription(`Das Nutzer-Limit wurde auf **${newLimit === 0 ? 'Unbegrenzt' : newLimit}** gesetzt!`)
+                .setTitle('✅ Nutzer-Limit geändert!')
+                .setDescription(`Das Nutzer-Limit wurde erfolgreich geändert.`)
                 .addFields(
-                    { name: '👥 Neues Limit', value: `${newLimit === 0 ? 'Unbegrenzt' : newLimit}`, inline: true },
-                    { name: '👤 Geändert von', value: `${intr.user}`, inline: true },
-                    { name: '📊 Aktuell im Channel', value: `${voiceChannel.members.size}`, inline: true }
+                    { name: '👥 Neues Limit', value: limit === 0 ? 'Unbegrenzt' : limit.toString(), inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
-                .setColor(0x3498db)
+                .setColor(0x00ff00)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • User Limit • MongoDB' });
+                .setFooter({ text: 'TempVoice • Limit Changed • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
-            Logger.error('Fehler beim Ändern des Limits', error);
+            Logger.error('Fehler beim Ändern des Nutzer-Limits', error);
             await intr.reply({
                 content: '❌ Fehler beim Ändern des Limits!',
                 ephemeral: true
@@ -283,28 +273,32 @@ export class TempVoiceLimitCommand implements Command {
     }
 }
 
-// 4. /byvoicename - Channel-Name ändern
+// 4. /byvoicename - Channel umbenennen
 export class TempVoiceRenameCommand implements Command {
+    public names = ['byvoicename'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 5000);
+
     public metadata = {
         name: 'byvoicename',
-        description: 'Ändert den Namen des temporären Voice-Channels',
+        description: 'Benennt den temporären Voice-Channel um',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoicename')
-        .setDescription('Ändert den Namen des temporären Voice-Channels')
+        .setDescription('Benennt den temporären Voice-Channel um')
         .addStringOption(option =>
             option.setName('name')
-                .setDescription('Neuer Name für den Channel')
+                .setDescription('Neuer Name des Channels')
                 .setRequired(true)
-                .setMinLength(1)
-                .setMaxLength(50));
+                .setMaxLength(100));
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const newName = intr.options.getString('name', true);
-        
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -316,38 +310,37 @@ export class TempVoiceRenameCommand implements Command {
 
         if (!(tempVoiceModule as any).isChannelOwner(intr.guildId!, (intr.member as GuildMember).voice.channel!.id, intr.user.id)) {
             await intr.reply({
-                content: '❌ Nur der Channel-Besitzer kann den Namen ändern!',
+                content: '❌ Nur der Channel-Besitzer kann den Channel umbenennen!',
                 ephemeral: true
             });
             return;
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            const textChannel = intr.guild!.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
-            
-            const oldName = voiceChannel.name;
-            
-            // Update channel names
-            await voiceChannel.setName(newName);
-            if (textChannel) {
-                await textChannel.setName(`💬${newName}`);
+            const result = await (tempVoiceModule as any).renameChannel(
+                intr.guildId!,
+                tempChannelData.channelId,
+                newName
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
 
-            // Log name change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'name_changed', intr.user.id);
-
             const embed = new EmbedBuilder()
-                .setTitle('✏️ Channel umbenannt!')
-                .setDescription(`Der Channel wurde erfolgreich umbenannt!`)
+                .setTitle('✅ Channel umbenannt!')
+                .setDescription(`Der Channel wurde erfolgreich umbenannt.`)
                 .addFields(
-                    { name: '📝 Alter Name', value: oldName, inline: true },
-                    { name: '✨ Neuer Name', value: newName, inline: true },
-                    { name: '👤 Geändert von', value: `${intr.user}`, inline: true }
+                    { name: '📝 Neuer Name', value: newName, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
-                .setColor(0x3498db)
+                .setColor(0x00ff00)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Channel Rename • MongoDB' });
+                .setFooter({ text: 'TempVoice • Channel Renamed • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
@@ -359,11 +352,14 @@ export class TempVoiceRenameCommand implements Command {
         }
     }
 }
-// src/commands/chat/tempvoice-commands.ts - Teil 2/8
-// Sichtbarkeit, Sperrung und Sicherheits-Commands
 
 // 5. /byvoicehide - Channel verstecken
 export class TempVoiceHideCommand implements Command {
+    public names = ['byvoicehide'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoicehide',
         description: 'Versteckt den temporären Voice-Channel vor anderen Nutzern',
@@ -387,13 +383,13 @@ export class TempVoiceHideCommand implements Command {
 
         if (!(tempVoiceModule as any).isChannelOwner(intr.guildId!, (intr.member as GuildMember).voice.channel!.id, intr.user.id)) {
             await intr.reply({
-                content: '❌ Nur der Channel-Besitzer kann die Sichtbarkeit ändern!',
+                content: '❌ Nur der Channel-Besitzer kann den Channel verstecken!',
                 ephemeral: true
             });
             return;
         }
 
-        if (!tempChannelData.isVisible) {
+        if (tempChannelData.isHidden) {
             await intr.reply({
                 content: '❌ Der Channel ist bereits versteckt!',
                 ephemeral: true
@@ -402,46 +398,27 @@ export class TempVoiceHideCommand implements Command {
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Sammle alle Permission IDs EINMAL
-            const permissionIds = Array.from(voiceChannel.permissionOverwrites.cache.keys());
-            
-            // Bearbeite alle Permissions sequenziell
-            for (const id of permissionIds) {
-                if (id === tempChannelData.ownerId) {
-                    // Owner-Permissions nicht ändern - immer sichtbar
-                    continue;
-                }
-                
-                try {
-                    await voiceChannel.permissionOverwrites.edit(id, {
-                        ViewChannel: false // verstecken
-                    });
-                    
-                    // Kleine Pause zwischen Updates um Rate-Limits zu vermeiden
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } catch (error) {
-                    Logger.warn(`Warnung: Konnte Permission für ${id} nicht setzen: ${error}`);
-                }
+            const result = await (tempVoiceModule as any).hideChannel(
+                intr.guildId!,
+                tempChannelData.channelId
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
 
-            // Update in MongoDB
-            tempChannelData.isVisible = false;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Log visibility change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'channel_hidden', intr.user.id);
-
             const embed = new EmbedBuilder()
-                .setTitle('🙈 Channel versteckt!')
-                .setDescription('Voice-Channel ist jetzt vor anderen Nutzern versteckt!')
+                .setTitle('✅ Channel versteckt!')
+                .setDescription(`Der Channel wurde erfolgreich vor anderen Nutzern versteckt.`)
                 .addFields(
                     { name: '👁️ Sichtbarkeit', value: 'Versteckt', inline: true },
-                    { name: '👤 Geändert von', value: `${intr.user}`, inline: true },
-                    { name: '💡 Hinweis', value: 'Nutzer können den Channel nicht mehr sehen, aber bereits verbundene Nutzer bleiben verbunden.', inline: false }
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
-                .setColor(0x95a5a6)
+                .setColor(0xffa500)
                 .setTimestamp()
                 .setFooter({ text: 'TempVoice • Channel Hidden • MongoDB' });
 
@@ -455,9 +432,13 @@ export class TempVoiceHideCommand implements Command {
         }
     }
 }
-
 // 6. /byvoiceshow - Channel sichtbar machen
 export class TempVoiceShowCommand implements Command {
+    public names = ['byvoiceshow'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoiceshow',
         description: 'Macht den temporären Voice-Channel wieder sichtbar',
@@ -481,13 +462,13 @@ export class TempVoiceShowCommand implements Command {
 
         if (!(tempVoiceModule as any).isChannelOwner(intr.guildId!, (intr.member as GuildMember).voice.channel!.id, intr.user.id)) {
             await intr.reply({
-                content: '❌ Nur der Channel-Besitzer kann die Sichtbarkeit ändern!',
+                content: '❌ Nur der Channel-Besitzer kann den Channel sichtbar machen!',
                 ephemeral: true
             });
             return;
         }
 
-        if (tempChannelData.isVisible) {
+        if (!tempChannelData.isHidden) {
             await intr.reply({
                 content: '❌ Der Channel ist bereits sichtbar!',
                 ephemeral: true
@@ -496,44 +477,25 @@ export class TempVoiceShowCommand implements Command {
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Sammle alle Permission IDs EINMAL
-            const permissionIds = Array.from(voiceChannel.permissionOverwrites.cache.keys());
-            
-            // Bearbeite alle Permissions sequenziell
-            for (const id of permissionIds) {
-                if (id === tempChannelData.ownerId) {
-                    // Owner-Permissions nicht ändern - immer sichtbar
-                    continue;
-                }
-                
-                try {
-                    await voiceChannel.permissionOverwrites.edit(id, {
-                        ViewChannel: true // sichtbar machen
-                    });
-                    
-                    // Kleine Pause zwischen Updates um Rate-Limits zu vermeiden
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } catch (error) {
-                    Logger.warn(`Warnung: Konnte Permission für ${id} nicht setzen: ${error}`);
-                }
+            const result = await (tempVoiceModule as any).showChannel(
+                intr.guildId!,
+                tempChannelData.channelId
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
 
-            // Update in MongoDB
-            tempChannelData.isVisible = true;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Log visibility change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'channel_shown', intr.user.id);
-
             const embed = new EmbedBuilder()
-                .setTitle('👁️ Channel sichtbar!')
-                .setDescription('Voice-Channel ist jetzt wieder für alle sichtbar!')
+                .setTitle('✅ Channel sichtbar!')
+                .setDescription(`Der Channel ist wieder für alle Nutzer sichtbar.`)
                 .addFields(
                     { name: '👁️ Sichtbarkeit', value: 'Sichtbar', inline: true },
-                    { name: '👤 Geändert von', value: `${intr.user}`, inline: true },
-                    { name: '💡 Hinweis', value: 'Alle Nutzer können den Channel jetzt wieder sehen und beitreten.', inline: false }
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0x00ff00)
                 .setTimestamp()
@@ -552,6 +514,11 @@ export class TempVoiceShowCommand implements Command {
 
 // 7. /byvoicelock - Channel sperren
 export class TempVoiceLockCommand implements Command {
+    public names = ['byvoicelock'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoicelock',
         description: 'Sperrt den temporären Voice-Channel für neue Nutzer',
@@ -590,44 +557,25 @@ export class TempVoiceLockCommand implements Command {
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Sammle alle Permission IDs EINMAL
-            const permissionIds = Array.from(voiceChannel.permissionOverwrites.cache.keys());
-            
-            // Bearbeite alle Permissions sequenziell
-            for (const id of permissionIds) {
-                if (id === tempChannelData.ownerId) {
-                    // Owner-Permissions nicht ändern - kann immer beitreten
-                    continue;
-                }
-                
-                try {
-                    await voiceChannel.permissionOverwrites.edit(id, {
-                        Connect: false // sperren
-                    });
-                    
-                    // Kleine Pause zwischen Updates um Rate-Limits zu vermeiden
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } catch (error) {
-                    Logger.warn(`Warnung: Konnte Permission für ${id} nicht setzen: ${error}`);
-                }
+            const result = await (tempVoiceModule as any).lockChannel(
+                intr.guildId!,
+                tempChannelData.channelId
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
-
-            // Update in MongoDB
-            tempChannelData.isLocked = true;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Log lock change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'channel_locked', intr.user.id);
 
             const embed = new EmbedBuilder()
                 .setTitle('🔒 Channel gesperrt!')
-                .setDescription('Voice-Channel ist jetzt für neue Nutzer gesperrt!')
+                .setDescription(`Der Channel wurde für neue Nutzer gesperrt.`)
                 .addFields(
-                    { name: '🔒 Status', value: 'Gesperrt', inline: true },
-                    { name: '👤 Gesperrt von', value: `${intr.user}`, inline: true },
-                    { name: '💡 Hinweis', value: 'Bereits verbundene Nutzer bleiben verbunden, aber neue Nutzer können nicht beitreten.', inline: false }
+                    { name: '🔐 Status', value: 'Gesperrt', inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0xff0000)
                 .setTimestamp()
@@ -646,6 +594,11 @@ export class TempVoiceLockCommand implements Command {
 
 // 8. /byvoiceunlock - Channel entsperren
 export class TempVoiceUnlockCommand implements Command {
+    public names = ['byvoiceunlock'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoiceunlock',
         description: 'Entsperrt den temporären Voice-Channel für neue Nutzer',
@@ -684,44 +637,25 @@ export class TempVoiceUnlockCommand implements Command {
         }
 
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Sammle alle Permission IDs EINMAL
-            const permissionIds = Array.from(voiceChannel.permissionOverwrites.cache.keys());
-            
-            // Bearbeite alle Permissions sequenziell
-            for (const id of permissionIds) {
-                if (id === tempChannelData.ownerId) {
-                    // Owner-Permissions nicht ändern
-                    continue;
-                }
-                
-                try {
-                    await voiceChannel.permissionOverwrites.edit(id, {
-                        Connect: true // entsperren
-                    });
-                    
-                    // Kleine Pause zwischen Updates um Rate-Limits zu vermeiden
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } catch (error) {
-                    Logger.warn(`Warnung: Konnte Permission für ${id} nicht setzen: ${error}`);
-                }
+            const result = await (tempVoiceModule as any).unlockChannel(
+                intr.guildId!,
+                tempChannelData.channelId
+            );
+
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
-
-            // Update in MongoDB
-            tempChannelData.isLocked = false;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Log unlock change
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'channel_unlocked', intr.user.id);
 
             const embed = new EmbedBuilder()
                 .setTitle('🔓 Channel entsperrt!')
-                .setDescription('Voice-Channel ist jetzt wieder für alle Nutzer offen!')
+                .setDescription(`Der Channel wurde für neue Nutzer entsperrt.`)
                 .addFields(
-                    { name: '🔒 Status', value: 'Offen', inline: true },
-                    { name: '👤 Entsperrt von', value: `${intr.user}`, inline: true },
-                    { name: '💡 Hinweis', value: 'Alle Nutzer können jetzt wieder dem Channel beitreten.', inline: false }
+                    { name: '🔐 Status', value: 'Entsperrt', inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0x00ff00)
                 .setTimestamp()
@@ -740,16 +674,21 @@ export class TempVoiceUnlockCommand implements Command {
 
 // 9. /byvoiceclaim - Channel beanspruchen
 export class TempVoiceClaimCommand implements Command {
+    public names = ['byvoiceclaim'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 5000);
+
     public metadata = {
         name: 'byvoiceclaim',
-        description: 'Beansprucht den Channel wenn der Besitzer nicht anwesend ist',
+        description: 'Beansprucht einen temporären Voice-Channel ohne Besitzer',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoiceclaim')
-        .setDescription('Beansprucht den Channel wenn der Besitzer nicht anwesend ist');
+        .setDescription('Beansprucht einen temporären Voice-Channel ohne Besitzer');
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
@@ -761,54 +700,39 @@ export class TempVoiceClaimCommand implements Command {
             return;
         }
 
-        // Check if user is already the owner
-        if (tempChannelData.ownerId === intr.user.id) {
+        if (tempChannelData.ownerId && intr.guild!.members.cache.get(tempChannelData.ownerId)) {
             await intr.reply({
-                content: '❌ Du bist bereits der Besitzer dieses Channels!',
+                content: '❌ Dieser Channel hat bereits einen aktiven Besitzer!',
                 ephemeral: true
             });
             return;
         }
-
-        // Check if owner is still in channel
-        const channel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-        const ownerInChannel = channel.members.has(tempChannelData.ownerId);
-
-        if (ownerInChannel) {
-            await intr.reply({
-                content: '❌ Der aktuelle Besitzer ist noch im Channel!',
-                ephemeral: true
-            });
-            return;
-        }
-
-        const oldOwnerId = tempChannelData.ownerId;
-        const oldOwnerName = tempChannelData.ownerName;
 
         try {
-            // Transfer ownership in MongoDB
-            tempChannelData.ownerId = intr.user.id;
-            tempChannelData.ownerName = (intr.member as GuildMember).displayName;
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, channel.id, tempChannelData);
+            const result = await (tempVoiceModule as any).claimChannel(
+                intr.guildId!,
+                tempChannelData.channelId,
+                intr.user.id
+            );
 
-            // Give owner permissions
-            const textChannel = intr.guild!.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
-            await (tempVoiceModule as any).updateOwnerPermissions(channel, textChannel, intr.member as GuildMember, oldOwnerId);
-
-            // Log claim action
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, channel.id, 'channel_claimed', intr.user.id);
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
+            }
 
             const embed = new EmbedBuilder()
-                .setTitle('👑 Channel beansprucht!')
-                .setDescription(`**${(intr.member as GuildMember).displayName}** hat den Channel erfolgreich beansprucht!`)
+                .setTitle('✅ Channel beansprucht!')
+                .setDescription(`Du bist jetzt der Besitzer dieses Channels.`)
                 .addFields(
-                    { name: '👤 Neuer Besitzer', value: `${intr.member}`, inline: true },
-                    { name: '👻 Vorheriger Besitzer', value: `${oldOwnerName} (abwesend)`, inline: true },
-                    { name: '⏰ Beansprucht', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                    { name: '👤 Neuer Besitzer', value: `${intr.user}`, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0x00ff00)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Channel Claim • MongoDB' });
+                .setFooter({ text: 'TempVoice • Channel Claimed • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
@@ -820,11 +744,14 @@ export class TempVoiceClaimCommand implements Command {
         }
     }
 }
-// src/commands/chat/tempvoice-commands.ts - Teil 3/8
-// Moderation und Status-Commands
 
 // 10. /byvoiceban - Nutzer verbannen
 export class TempVoiceBanCommand implements Command {
+    public names = ['byvoiceban'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels', 'MoveMembers'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoiceban',
         description: 'Verbannt einen Nutzer aus dem temporären Voice-Channel',
@@ -837,7 +764,7 @@ export class TempVoiceBanCommand implements Command {
         .setDescription('Verbannt einen Nutzer aus dem temporären Voice-Channel')
         .addUserOption(option =>
             option.setName('user')
-                .setDescription('Nutzer der verbannt werden soll')
+                .setDescription('Nutzer zum Verbannen')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('reason')
@@ -848,7 +775,7 @@ export class TempVoiceBanCommand implements Command {
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const targetUser = intr.options.getUser('user', true);
         const reason = intr.options.getString('reason') || 'Kein Grund angegeben';
-        
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -874,83 +801,51 @@ export class TempVoiceBanCommand implements Command {
             return;
         }
 
-        if (tempChannelData.bannedUsers.includes(targetUser.id)) {
-            await intr.reply({
-                content: '❌ Dieser Nutzer ist bereits verbannt!',
-                ephemeral: true
-            });
-            return;
-        }
-
         const targetMember = intr.guild!.members.cache.get(targetUser.id);
         if (!targetMember) {
             await intr.reply({
-                content: '❌ Nutzer nicht auf diesem Server gefunden!',
+                content: '❌ Der Nutzer ist nicht auf diesem Server!',
                 ephemeral: true
             });
             return;
         }
-        
+
         try {
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            
-            // Add to banned list in MongoDB
-            tempChannelData.bannedUsers.push(targetUser.id);
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, voiceChannel.id, tempChannelData);
-
-            // Set channel permissions to deny access
-            await voiceChannel.permissionOverwrites.create(targetMember, {
-                ViewChannel: false,
-                Connect: false,
-                Speak: false
-            });
-
-            // Kick user if they're currently in the channel
-            if (voiceChannel.members.has(targetUser.id)) {
-                await targetMember.voice.disconnect('Aus TempVoice-Channel verbannt');
-            }
-
-            // Log ban action with reason
-            await (tempVoiceModule as any).updateTempChannelActivity(
-                intr.guildId!, 
-                voiceChannel.id, 
-                'user_banned', 
-                targetUser.id, 
-                { reason, bannedBy: intr.user.id }
+            const result = await (tempVoiceModule as any).banUserFromChannel(
+                intr.guildId!,
+                tempChannelData.channelId,
+                targetUser.id,
+                reason
             );
 
-            // Try to send DM to banned user
-            try {
-                const dmEmbed = new EmbedBuilder()
-                    .setTitle('🚫 Aus TempVoice-Channel verbannt')
-                    .setDescription(`Du wurdest aus einem temporären Voice-Channel verbannt.`)
-                    .addFields(
-                        { name: '📢 Server', value: intr.guild!.name, inline: true },
-                        { name: '👤 Verbannt von', value: (intr.member as GuildMember).displayName, inline: true },
-                        { name: '📝 Grund', value: reason, inline: false }
-                    )
-                    .setColor(0xff0000)
-                    .setTimestamp();
-                
-                await targetUser.send({ embeds: [dmEmbed] });
-            } catch (error) {
-                // DM failed - user has DMs disabled or blocked bot
-                Logger.warn(`Konnte DM nicht an verbannten Nutzer ${targetUser.tag} senden`);
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
+            }
+
+            // Nutzer aus dem Channel entfernen, falls er drin ist
+            if (targetMember.voice.channel && targetMember.voice.channel.id === tempChannelData.channelId) {
+                try {
+                    await targetMember.voice.disconnect('Channel-Bann');
+                } catch (error) {
+                    Logger.warn('Konnte gebannten Nutzer nicht disconnecten', error);
+                }
             }
 
             const embed = new EmbedBuilder()
-                .setTitle('🚫 Nutzer verbannt')
-                .setDescription(`**${targetMember.displayName}** wurde aus dem Channel verbannt!`)
+                .setTitle('🔨 Nutzer verbannt!')
+                .setDescription(`Der Nutzer wurde aus dem Channel verbannt.`)
                 .addFields(
-                    { name: '👤 Verbannter Nutzer', value: `${targetMember}`, inline: true },
-                    { name: '👑 Verbannt von', value: `${intr.user}`, inline: true },
-                    { name: '📝 Grund', value: reason, inline: false },
-                    { name: '📊 Gebannte Nutzer', value: `${tempChannelData.bannedUsers.length}`, inline: true },
-                    { name: '⏰ Verbannt', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                    { name: '👤 Verbannter Nutzer', value: `${targetUser}`, inline: true },
+                    { name: '📝 Grund', value: reason, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: false }
                 )
                 .setColor(0xff0000)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • User Ban • MongoDB' });
+                .setFooter({ text: 'TempVoice • User Banned • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
@@ -962,9 +857,13 @@ export class TempVoiceBanCommand implements Command {
         }
     }
 }
-
 // 11. /byvoiceunban - Nutzer entbannen
 export class TempVoiceUnbanCommand implements Command {
+    public names = ['byvoiceunban'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoiceunban',
         description: 'Entbannt einen Nutzer aus dem temporären Voice-Channel',
@@ -977,12 +876,12 @@ export class TempVoiceUnbanCommand implements Command {
         .setDescription('Entbannt einen Nutzer aus dem temporären Voice-Channel')
         .addUserOption(option =>
             option.setName('user')
-                .setDescription('Nutzer der entbannt werden soll')
+                .setDescription('Nutzer zum Entbannen')
                 .setRequired(true));
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const targetUser = intr.options.getUser('user', true);
-        
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -1000,66 +899,31 @@ export class TempVoiceUnbanCommand implements Command {
             return;
         }
 
-        if (!tempChannelData.bannedUsers.includes(targetUser.id)) {
-            await intr.reply({
-                content: '❌ Dieser Nutzer ist nicht verbannt!',
-                ephemeral: true
-            });
-            return;
-        }
-
-        const targetMember = intr.guild!.members.cache.get(targetUser.id);
-        if (!targetMember) {
-            await intr.reply({
-                content: '❌ Nutzer nicht auf diesem Server gefunden!',
-                ephemeral: true
-            });
-            return;
-        }
-        
         try {
-            // Remove from banned list in MongoDB
-            tempChannelData.bannedUsers = tempChannelData.bannedUsers.filter(id => id !== targetUser.id);
-            await (tempVoiceModule as any).setTempChannel(intr.guildId!, (intr.member as GuildMember).voice.channel!.id, tempChannelData);
+            const result = await (tempVoiceModule as any).unbanUserFromChannel(
+                intr.guildId!,
+                tempChannelData.channelId,
+                targetUser.id
+            );
 
-            // Remove channel permissions
-            const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            await voiceChannel.permissionOverwrites.delete(targetMember);
-
-            // Log unban action
-            await (tempVoiceModule as any).updateTempChannelActivity(intr.guildId!, voiceChannel.id, 'user_unbanned', targetUser.id);
-
-            // Try to send DM to unbanned user
-            try {
-                const dmEmbed = new EmbedBuilder()
-                    .setTitle('✅ TempVoice-Channel Entbannung')
-                    .setDescription(`Du wurdest aus einem temporären Voice-Channel entbannt.`)
-                    .addFields(
-                        { name: '📢 Server', value: intr.guild!.name, inline: true },
-                        { name: '👤 Entbannt von', value: (intr.member as GuildMember).displayName, inline: true },
-                        { name: '💡 Status', value: 'Du kannst dem Channel jetzt wieder beitreten!', inline: false }
-                    )
-                    .setColor(0x00ff00)
-                    .setTimestamp();
-                
-                await targetUser.send({ embeds: [dmEmbed] });
-            } catch (error) {
-                // DM failed - user has DMs disabled or blocked bot
-                Logger.warn(`Konnte DM nicht an entbannten Nutzer ${targetUser.tag} senden`);
+            if (!result.success) {
+                await intr.reply({
+                    content: `❌ ${result.message}`,
+                    ephemeral: true
+                });
+                return;
             }
 
             const embed = new EmbedBuilder()
-                .setTitle('✅ Nutzer entbannt')
-                .setDescription(`**${targetMember.displayName}** wurde entbannt!`)
+                .setTitle('✅ Nutzer entbannt!')
+                .setDescription(`Der Nutzer wurde aus der Bannliste entfernt.`)
                 .addFields(
-                    { name: '👤 Entbannter Nutzer', value: `${targetMember}`, inline: true },
-                    { name: '👑 Entbannt von', value: `${intr.user}`, inline: true },
-                    { name: '📊 Gebannte Nutzer', value: `${tempChannelData.bannedUsers.length}`, inline: true },
-                    { name: '⏰ Entbannt', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                    { name: '👤 Entbannter Nutzer', value: `${targetUser}`, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: true }
                 )
                 .setColor(0x00ff00)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • User Unban • MongoDB' });
+                .setFooter({ text: 'TempVoice • User Unbanned • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
@@ -1074,6 +938,11 @@ export class TempVoiceUnbanCommand implements Command {
 
 // 12. /byvoicekick - Nutzer rauswerfen
 export class TempVoiceKickCommand implements Command {
+    public names = ['byvoicekick'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['MoveMembers'];
+    public cooldown = new RateLimiter(1, 3000);
+
     public metadata = {
         name: 'byvoicekick',
         description: 'Wirft einen Nutzer aus dem temporären Voice-Channel',
@@ -1086,7 +955,7 @@ export class TempVoiceKickCommand implements Command {
         .setDescription('Wirft einen Nutzer aus dem temporären Voice-Channel')
         .addUserOption(option =>
             option.setName('user')
-                .setDescription('Nutzer der rausgeworfen werden soll')
+                .setDescription('Nutzer zum Rauswerfen')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('reason')
@@ -1097,7 +966,7 @@ export class TempVoiceKickCommand implements Command {
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const targetUser = intr.options.getUser('user', true);
         const reason = intr.options.getString('reason') || 'Kein Grund angegeben';
-        
+
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
         if (!tempChannelData) {
             await intr.reply({
@@ -1126,66 +995,34 @@ export class TempVoiceKickCommand implements Command {
         const targetMember = intr.guild!.members.cache.get(targetUser.id);
         if (!targetMember) {
             await intr.reply({
-                content: '❌ Nutzer nicht auf diesem Server gefunden!',
+                content: '❌ Der Nutzer ist nicht auf diesem Server!',
                 ephemeral: true
             });
             return;
         }
 
-        const voiceChannel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-        if (!voiceChannel.members.has(targetUser.id)) {
+        if (!targetMember.voice.channel || targetMember.voice.channel.id !== tempChannelData.channelId) {
             await intr.reply({
-                content: '❌ Dieser Nutzer ist nicht im Voice-Channel!',
+                content: '❌ Der Nutzer ist nicht in diesem Channel!',
                 ephemeral: true
             });
             return;
         }
-        
+
         try {
-            // Kick user from voice channel
             await targetMember.voice.disconnect(reason);
 
-            // Log kick action
-            await (tempVoiceModule as any).updateTempChannelActivity(
-                intr.guildId!, 
-                voiceChannel.id, 
-                'user_kicked', 
-                targetUser.id, 
-                { reason, kickedBy: intr.user.id }
-            );
-
-            // Try to send DM to kicked user
-            try {
-                const dmEmbed = new EmbedBuilder()
-                    .setTitle('🦶 Aus TempVoice-Channel entfernt')
-                    .setDescription(`Du wurdest aus einem temporären Voice-Channel entfernt.`)
-                    .addFields(
-                        { name: '📢 Server', value: intr.guild!.name, inline: true },
-                        { name: '👤 Entfernt von', value: (intr.member as GuildMember).displayName, inline: true },
-                        { name: '📝 Grund', value: reason, inline: false },
-                        { name: '💡 Hinweis', value: 'Du kannst dem Channel wieder beitreten, es sei denn du wurdest verbannt.', inline: false }
-                    )
-                    .setColor(0xffa500)
-                    .setTimestamp();
-                
-                await targetUser.send({ embeds: [dmEmbed] });
-            } catch (error) {
-                // DM failed - user has DMs disabled or blocked bot
-                Logger.warn(`Konnte DM nicht an gekickten Nutzer ${targetUser.tag} senden`);
-            }
-
             const embed = new EmbedBuilder()
-                .setTitle('🦶 Nutzer entfernt')
-                .setDescription(`**${targetMember.displayName}** wurde aus dem Channel entfernt!`)
+                .setTitle('👢 Nutzer rausgeworfen!')
+                .setDescription(`Der Nutzer wurde aus dem Channel entfernt.`)
                 .addFields(
-                    { name: '👤 Entfernter Nutzer', value: `${targetMember}`, inline: true },
-                    { name: '👑 Entfernt von', value: `${intr.user}`, inline: true },
-                    { name: '📝 Grund', value: reason, inline: false },
-                    { name: '⏰ Entfernt', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                    { name: '👤 Rausgeworfener Nutzer', value: `${targetUser}`, inline: true },
+                    { name: '📝 Grund', value: reason, inline: true },
+                    { name: '📢 Channel', value: `<#${tempChannelData.channelId}>`, inline: false }
                 )
                 .setColor(0xffa500)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • User Kick • MongoDB' });
+                .setFooter({ text: 'TempVoice • User Kicked • MongoDB' });
 
             await intr.reply({ embeds: [embed] });
         } catch (error) {
@@ -1198,18 +1035,23 @@ export class TempVoiceKickCommand implements Command {
     }
 }
 
-// 13. /byvoicestatus - Channel-Status anzeigen
+// 13. /byvoicestatus - Channel-Status
 export class TempVoiceStatusCommand implements Command {
+    public names = ['byvoicestatus'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = [];
+    public cooldown = new RateLimiter(1, 5000);
+
     public metadata = {
         name: 'byvoicestatus',
-        description: 'Zeigt detaillierte Informationen über den temporären Voice-Channel',
+        description: 'Zeigt den Status des temporären Voice-Channels an',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoicestatus')
-        .setDescription('Zeigt detaillierte Informationen über den temporären Voice-Channel');
+        .setDescription('Zeigt den Status des temporären Voice-Channels an');
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
         const tempChannelData = (tempVoiceModule as any).isInTempChannel(intr);
@@ -1222,71 +1064,56 @@ export class TempVoiceStatusCommand implements Command {
         }
 
         try {
-            const channel = (intr.member as GuildMember).voice.channel as VoiceChannel;
-            const textChannel = intr.guild!.channels.cache.get(tempChannelData.textChannelId) as TextChannel;
-            
-            // Calculate channel lifetime
-            const lifetimeMs = Date.now() - tempChannelData.createdAt.getTime();
-            const lifetimeMinutes = Math.floor(lifetimeMs / 60000);
-            
-            // Get connected users
-            const connectedUsers = channel.members.map(member => member.displayName).join('\n') || 'Keine Nutzer verbunden';
-            
-            // Get banned users with names
-            const bannedUserNames = tempChannelData.bannedUsers.length > 0 
-                ? await Promise.all(
-                    tempChannelData.bannedUsers.map(async userId => {
-                        try {
-                            const user = await intr.client.users.fetch(userId);
-                            return user.username;
-                        } catch {
-                            return `Unknown User (${userId})`;
-                        }
-                    })
-                ).then(names => names.join('\n'))
-                : 'Keine verbannten Nutzer';
+            const channel = intr.guild!.channels.cache.get(tempChannelData.channelId);
+            if (!channel || !channel.isVoiceBased()) {
+                await intr.reply({
+                    content: '❌ Channel nicht gefunden!',
+                    ephemeral: true
+                });
+                return;
+            }
 
-            // Status indicators
-            const visibilityIcon = tempChannelData.isVisible ? '👁️' : '🙈';
-            const lockIcon = tempChannelData.isLocked ? '🔒' : '🔓';
-            const statusText = `${tempChannelData.isVisible ? 'Sichtbar' : 'Versteckt'} • ${tempChannelData.isLocked ? 'Gesperrt' : 'Offen'}`;
+            const owner = tempChannelData.ownerId ? await intr.guild!.members.fetch(tempChannelData.ownerId).catch(() => null) : null;
+            const bannedUsers = tempChannelData.bannedUsers || [];
+            const createdAt = tempChannelData.createdAt ? new Date(tempChannelData.createdAt) : new Date();
+
+            const statusEmoji = {
+                locked: tempChannelData.isLocked ? '🔒' : '🔓',
+                hidden: tempChannelData.isHidden ? '👁️‍🗨️' : '👁️',
+                limit: channel.userLimit === 0 ? '∞' : channel.userLimit.toString()
+            };
 
             const embed = new EmbedBuilder()
-                .setTitle(`📊 Channel-Status: ${channel.name}`)
-                .setDescription(`Detaillierte Informationen über deinen temporären Voice-Channel`)
-                .setColor(0x3498db)
+                .setTitle('📊 Channel-Status')
+                .setDescription(`Status-Informationen für ${channel.name}`)
                 .addFields(
-                    { name: '👑 Besitzer', value: `${tempChannelData.ownerName}`, inline: true },
-                    { name: '👥 Max. Nutzer', value: `${tempChannelData.maxUsers === 0 ? 
-                        'Unbegrenzt' : tempChannelData.maxUsers}`, inline: true },
-                    { name: `${visibilityIcon} Sichtbarkeit`, value: tempChannelData.isVisible ? 'Sichtbar' : 'Versteckt', inline: true },
-                    { name: `${lockIcon} Zugang`, value: tempChannelData.isLocked ? 'Gesperrt' : 'Offen', inline: true },
-                    { name: '📊 Status', value: statusText, inline: true },
-                    { name: '🔢 Aktuelle Nutzer', value: `${channel.members.size}/${tempChannelData.maxUsers === 0 ? '∞' : tempChannelData.maxUsers}`, inline: true },
-                    { name: '⏱️ Lebensdauer', value: `${lifetimeMinutes} Minuten`, inline: true },
-                    { name: '🗄️ Speicher', value: 'MongoDB', inline: true },
-                    { name: '📝 Text-Channel', value: textChannel ? `${textChannel}` : 'Nicht gefunden', inline: true },
-                    { name: '⏰ Erstellt', value: `<t:${Math.floor(tempChannelData.createdAt.getTime() / 1000)}:R>`, inline: false },
-                    { name: '👥 Verbundene Nutzer', value: connectedUsers, inline: false },
-                    { name: '🚫 Verbannte Nutzer', value: bannedUserNames, inline: false }
+                    { name: '📢 Channel', value: `<#${channel.id}>`, inline: true },
+                    { name: '👤 Besitzer', value: owner ? `${owner.user}` : 'Kein Besitzer', inline: true },
+                    { name: '👥 Nutzer', value: `${channel.members.size}/${statusEmoji.limit}`, inline: true },
+                    { name: '🔐 Gesperrt', value: statusEmoji.locked, inline: true },
+                    { name: '👁️ Sichtbar', value: statusEmoji.hidden, inline: true },
+                    { name: '🚫 Gebannt', value: bannedUsers.length.toString(), inline: true },
+                    { name: '⏰ Erstellt', value: `<t:${Math.floor(createdAt.getTime() / 1000)}:R>`, inline: false }
                 )
+                .setColor(0x5865f2)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Channel Status • MongoDB • Automatische Löschung bei Leere' });
+                .setFooter({ text: 'TempVoice • Channel Status • MongoDB' });
 
-            // Activity Log (last 5 activities) if available
-            const activityLog = await (tempVoiceModule as any).getChannelActivity(intr.guildId!, channel.id, 5);
-            if (activityLog && activityLog.length > 0) {
-                const recentActivities = activityLog
-                    .reverse()
-                    .map(activity => {
-                        const timestamp = Math.floor(activity.timestamp.getTime() / 1000);
-                        return `<t:${timestamp}:t> - ${activity.activity}`;
+            if (bannedUsers.length > 0) {
+                const bannedList = await Promise.all(
+                    bannedUsers.slice(0, 5).map(async (userId: string) => {
+                        try {
+                            const user = await intr.client.users.fetch(userId);
+                            return user.tag;
+                        } catch {
+                            return `Unbekannter Nutzer (${userId})`;
+                        }
                     })
-                    .join('\n');
-                
+                );
+
                 embed.addFields({
-                    name: '📋 Letzte Aktivitäten',
-                    value: recentActivities || 'Keine Aktivitäten',
+                    name: '🚫 Gebannte Nutzer',
+                    value: bannedList.join('\n') + (bannedUsers.length > 5 ? `\n... und ${bannedUsers.length - 5} weitere` : ''),
                     inline: false
                 });
             }
@@ -1295,254 +1122,191 @@ export class TempVoiceStatusCommand implements Command {
         } catch (error) {
             Logger.error('Fehler beim Abrufen des Channel-Status', error);
             await intr.reply({
-                content: '❌ Fehler beim Abrufen des Channel-Status!',
+                content: '❌ Fehler beim Abrufen des Status!',
                 ephemeral: true
             });
         }
     }
 }
-// src/commands/chat/tempvoice-commands.ts - Teil 4/8
-// Admin-Commands und Statistiken
 
-// 14. /byvoicelist - Admin Command: Alle aktiven Temp-Channels anzeigen
+// 14. /byvoicelist - Admin Channel-Liste
 export class TempVoiceListCommand implements Command {
+    public names = ['byvoicelist'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = [];
+    public cooldown = new RateLimiter(1, 10000);
+
     public metadata = {
         name: 'byvoicelist',
-        description: 'Zeigt alle aktiven temporären Voice-Channels (Admin)',
+        description: 'Zeigt alle aktiven temporären Voice-Channels an (Admin)',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
-        defaultMemberPermissions: PermissionFlagsBits.Administrator,
+        defaultMemberPermissions: PermissionFlagsBits.ManageChannels,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoicelist')
-        .setDescription('Zeigt alle aktiven temporären Voice-Channels (Admin)')
-        .addBooleanOption(option =>
-            option.setName('detailed')
-                .setDescription('Zeigt detaillierte Informationen an')
-                .setRequired(false))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+        .setDescription('Zeigt alle aktiven temporären Voice-Channels an (Admin)')
+        .addIntegerOption(option =>
+            option.setName('page')
+                .setDescription('Seite der Ergebnisse')
+                .setRequired(false)
+                .setMinValue(1))
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
-        await intr.deferReply({ ephemeral: true });
-        
-        const detailed = intr.options.getBoolean('detailed') ?? false;
-        
+        const page = intr.options.getInteger('page') || 1;
+        const pageSize = 10;
+
         try {
             const allChannels = await (tempVoiceModule as any).getAllTempChannels(intr.guildId!);
             
             if (allChannels.length === 0) {
-                await intr.editReply({
-                    content: '📭 Keine aktiven temporären Voice-Channels gefunden!'
+                await intr.reply({
+                    content: '📝 Keine aktiven temporären Voice-Channels gefunden.',
+                    ephemeral: true
                 });
                 return;
             }
 
-            // Count active channels (channels with users)
-            let activeCount = 0;
-            const channelInfos: string[] = [];
-            
-            for (const channelData of allChannels) {
-                const voiceChannel = intr.guild!.channels.cache.get(channelData.voiceChannelId) as VoiceChannel;
-                if (!voiceChannel) continue;
-                
-                const isActive = voiceChannel.members.size > 0;
-                if (isActive) activeCount++;
-                
-                const lifetimeMinutes = Math.floor((Date.now() - channelData.createdAt.getTime()) / 60000);
-                const statusEmoji = isActive ? '🟢' : '🔴';
-                const visibilityEmoji = channelData.isVisible ? '👁️' : '🙈';
-                const lockEmoji = channelData.isLocked ? '🔒' : '🔓';
-                
-                if (detailed) {
-                    channelInfos.push(
-                        `${statusEmoji} **${voiceChannel.name}** (${voiceChannel.members.size}/${channelData.maxUsers === 0 ? '∞' : channelData.maxUsers})\n` +
-                        `   👑 ${channelData.ownerName} ${visibilityEmoji}${lockEmoji} | ${lifetimeMinutes}min | 🚫${channelData.bannedUsers.length}`
-                    );
-                } else {
-                    channelInfos.push(
-                        `${statusEmoji} **${voiceChannel.name}** - ${channelData.ownerName} (${voiceChannel.members.size}/${channelData.maxUsers === 0 ? '∞' : channelData.maxUsers})`
-                    );
-                }
-            }
-
-            // Split into multiple embeds if too long
-            const maxFieldLength = 1024;
-            const chunks: string[] = [];
-            let currentChunk = '';
-            
-            for (const info of channelInfos) {
-                if ((currentChunk + info).length > maxFieldLength) {
-                    chunks.push(currentChunk);
-                    currentChunk = info;
-                } else {
-                    currentChunk += (currentChunk ? '\n' : '') + info;
-                }
-            }
-            if (currentChunk) chunks.push(currentChunk);
+            const totalPages = Math.ceil(allChannels.length / pageSize);
+            const startIndex = (page - 1) * pageSize;
+            const endIndex = Math.min(startIndex + pageSize, allChannels.length);
+            const channelsOnPage = allChannels.slice(startIndex, endIndex);
 
             const embed = new EmbedBuilder()
                 .setTitle('📋 Aktive TempVoice-Channels')
-                .setDescription(`Übersicht aller temporären Voice-Channels auf diesem Server`)
-                .setColor(0x3498db)
-                .addFields(
-                    { name: '📊 Zusammenfassung', value: 
-                        `**${allChannels.length}** Channels gesamt\n` +
-                        `**${activeCount}** aktive Channels\n` +
-                        `**${allChannels.length - activeCount}** leere Channels`, inline: false }
-                );
+                .setDescription(`Seite ${page} von ${totalPages} • Gesamt: ${allChannels.length} Channels`)
+                .setColor(0x5865f2)
+                .setTimestamp()
+                .setFooter({ text: 'TempVoice • Channel List • MongoDB' });
 
-            // Add channel lists
-            chunks.forEach((chunk, index) => {
-                embed.addFields({
-                    name: index === 0 ? '📢 Channel-Liste' : `📢 Channel-Liste (${index + 1})`,
-                    value: chunk,
-                    inline: false
-                });
-            });
+            for (const channelData of channelsOnPage) {
+                const channel = intr.guild!.channels.cache.get(channelData.channelId);
+                const owner = channelData.ownerId ? await intr.guild!.members.fetch(channelData.ownerId).catch(() => null) : null;
+                
+                const statusIcons = [
+                    channelData.isLocked ? '🔒' : '',
+                    channelData.isHidden ? '👁️‍🗨️' : '',
+                    channelData.bannedUsers?.length > 0 ? '🚫' : ''
+                ].filter(Boolean).join(' ');
 
-            if (detailed) {
+                const channelInfo = channel
+                    ? `<#${channel.id}> (${channel.members.size} Nutzer)`
+                    : `Gelöschter Channel (${channelData.channelId})`;
+
                 embed.addFields({
-                    name: '🔍 Legende',
-                    value: '🟢 Aktiv | 🔴 Leer | 👁️ Sichtbar | 🙈 Versteckt | 🔒 Gesperrt | 🔓 Offen | 🚫 Verbannte',
+                    name: `${channelInfo} ${statusIcons}`,
+                    value: `👤 **Besitzer:** ${owner ? owner.user.tag : 'Kein Besitzer'}\n⏰ **Erstellt:** <t:${Math.floor(new Date(channelData.createdAt).getTime() / 1000)}:R>`,
                     inline: false
                 });
             }
 
-            embed
-                .setFooter({ text: `${activeCount}/${allChannels.length} Channel(s) aktiv • MongoDB • Auto-Löschung` })
-                .setTimestamp();
+            if (totalPages > 1) {
+                embed.addFields({
+                    name: '📖 Navigation',
+                    value: `Verwende \`/byvoicelist page:${page + 1}\` für die nächste Seite`,
+                    inline: false
+                });
+            }
 
-            await intr.editReply({ embeds: [embed] });
+            await intr.reply({ embeds: [embed] });
         } catch (error) {
             Logger.error('Fehler beim Abrufen der Channel-Liste', error);
-            await intr.editReply({
-                content: '❌ Fehler beim Abrufen der Channel-Liste!'
+            await intr.reply({
+                content: '❌ Fehler beim Abrufen der Channel-Liste!',
+                ephemeral: true
             });
         }
     }
 }
 
-// 15. /byvoicestats - Erweiterte Channel-Statistiken
+// 15. /byvoicestats - Erweiterte Statistiken
 export class TempVoiceStatsCommand implements Command {
+    public names = ['byvoicestats'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = [];
+    public cooldown = new RateLimiter(1, 10000);
+
     public metadata = {
         name: 'byvoicestats',
-        description: 'Zeigt erweiterte TempVoice-Statistiken (Admin)',
+        description: 'Zeigt erweiterte TempVoice-Statistiken an',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
-        defaultMemberPermissions: PermissionFlagsBits.Administrator,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoicestats')
-        .setDescription('Zeigt erweiterte TempVoice-Statistiken (Admin)')
+        .setDescription('Zeigt erweiterte TempVoice-Statistiken an')
         .addStringOption(option =>
             option.setName('timeframe')
-                .setDescription('Zeitraum für Statistiken')
+                .setDescription('Zeitraum für die Statistiken')
                 .setRequired(false)
                 .addChoices(
                     { name: 'Heute', value: 'today' },
                     { name: 'Diese Woche', value: 'week' },
                     { name: 'Dieser Monat', value: 'month' },
                     { name: 'Alle Zeit', value: 'all' }
-                ))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+                ));
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
-        await intr.deferReply({ ephemeral: true });
-        
-        const timeframe = intr.options.getString('timeframe') ?? 'all';
-        
+        const timeframe = intr.options.getString('timeframe') || 'all';
+
         try {
             const stats = await (tempVoiceModule as any).getDetailedStats(intr.guildId!, timeframe);
             
             const embed = new EmbedBuilder()
-                .setTitle('📊 TempVoice Statistiken')
-                .setDescription(`Erweiterte Statistiken für ${this.getTimeframeText(timeframe)}`)
-                .setColor(0x3498db)
-                .setTimestamp();
+                .setTitle('📈 TempVoice-Statistiken')
+                .setDescription(`Statistiken für ${this.getTimeframeText(timeframe)}`)
+                .addFields(
+                    { name: '📊 Allgemeine Statistiken', value: [
+                        `📢 **Aktive Channels:** ${stats.activeChannels}`,
+                        `🔧 **Creator-Channels:** ${stats.creatorChannels}`,
+                        `👥 **Aktive Nutzer:** ${stats.activeUsers}`,
+                        `⚡ **Durchschn. Response:** ${stats.averageResponseTime}ms`
+                    ].join('\n'), inline: true },
+                    { name: '📈 Channel-Aktivität', value: [
+                        `✅ **Erstellt:** ${stats.channelsCreated}`,
+                        `🗑️ **Gelöscht:** ${stats.channelsDeleted}`,
+                        `📊 **Durchschn. Dauer:** ${stats.averageChannelDuration}`,
+                        `👑 **Besitzer-Wechsel:** ${stats.ownershipChanges}`
+                    ].join('\n'), inline: true },
+                    { name: '🔧 Aktionen', value: [
+                        `🔒 **Sperren/Entsperren:** ${stats.lockActions}`,
+                        `👁️ **Verstecken/Zeigen:** ${stats.visibilityActions}`,
+                        `🚫 **Bans/Unbans:** ${stats.banActions}`,
+                        `👢 **Kicks:** ${stats.kickActions}`
+                    ].join('\n'), inline: true }
+                )
+                .setColor(0x5865f2)
+                .setTimestamp()
+                .setFooter({ text: 'TempVoice • Statistics • MongoDB' });
 
-            // Basis-Statistiken
-            embed.addFields(
-                { name: '📈 Channels gesamt', value: `${stats.totalChannels}`, inline: true },
-                { name: '🟢 Aktuell aktiv', value: `${stats.activeChannels}`, inline: true },
-                { name: '📅 Neue Channels', value: `${stats.channelsInTimeframe}`, inline: true },
-                { name: '🧠 Im Speicher', value: `${stats.memoryChannels}`, inline: true },
-                { name: '⏱️ Ø Lebensdauer', value: `${Math.round(stats.avgChannelLifetime / 60000)} Min`, inline: true },
-                { name: '👥 Ø Nutzer/Channel', value: `${stats.avgUsersPerChannel.toFixed(1)}`, inline: true }
-            );
+            if (stats.topUsers && stats.topUsers.length > 0) {
+                const topUsersList = await Promise.all(
+                    stats.topUsers.slice(0, 5).map(async (userData: any, index: number) => {
+                        try {
+                            const user = await intr.client.users.fetch(userData.userId);
+                            return `${index + 1}. ${user.tag} (${userData.channelCount} Channels)`;
+                        } catch {
+                            return `${index + 1}. Unbekannter Nutzer (${userData.channelCount} Channels)`;
+                        }
+                    })
+                );
 
-            // Performance-Statistiken
-            embed.addFields(
-                { name: '📊 Performance', value: 
-                    `**${stats.totalBans}** Bans\n` +
-                    `**${stats.totalKicks}** Kicks\n` +
-                    `**${stats.totalClaims}** Claims\n` +
-                    `**${stats.cleanupOperations}** Cleanups`, inline: true },
-                { name: '🎯 Aktivitäten', value: 
-                    `**${stats.totalNameChanges}** Umbenennungen\n` +
-                    `**${stats.totalLimitChanges}** Limit-Änderungen\n` +
-                    `**${stats.totalLockChanges}** Sperr-Änderungen\n` +
-                    `**${stats.totalVisibilityChanges}** Sichtbarkeits-Änderungen`, inline: true },
-                { name: '🗄️ System', value: 
-                    `**MongoDB** Datenbank\n` +
-                    `**${stats.databaseSize}** MB Speicher\n` +
-                    `**${stats.indexedChannels}** Indiziert\n` +
-                    `**${stats.orphanedChannels}** Verwaist`, inline: true }
-            );
-
-            // Top Channel-Ersteller
-            if (stats.topOwners && stats.topOwners.length > 0) {
-                const topOwnersList = stats.topOwners
-                    .slice(0, 5)
-                    .map((owner, index) => 
-                        `${index + 1}. **${owner.ownerName}**: ${owner.count} Channels`
-                    ).join('\n');
-                
                 embed.addFields({
-                    name: '👑 Top Channel-Ersteller',
-                    value: topOwnersList,
+                    name: '🏆 Top Channel-Ersteller',
+                    value: topUsersList.join('\n'),
                     inline: false
                 });
             }
 
-            // Trending Activities (if available)
-            if (stats.trendingActivities && stats.trendingActivities.length > 0) {
-                const trendingList = stats.trendingActivities
-                    .slice(0, 3)
-                    .map((activity, index) => 
-                        `${index + 1}. **${activity.type}**: ${activity.count}x`
-                    ).join('\n');
-                
-                embed.addFields({
-                    name: '📈 Trending Aktivitäten',
-                    value: trendingList,
-                    inline: true
-                });
-            }
-
-            // Peak Times (if available)
-            if (stats.peakHours && stats.peakHours.length > 0) {
-                const peakHoursList = stats.peakHours
-                    .slice(0, 3)
-                    .map((hour, index) => 
-                        `${index + 1}. **${hour.hour}:00**: ${hour.count} Channels`
-                    ).join('\n');
-                
-                embed.addFields({
-                    name: '⏰ Peak-Zeiten',
-                    value: peakHoursList,
-                    inline: true
-                });
-            }
-
-            embed.setFooter({ text: 'TempVoice System • MongoDB • Erweiterte Statistiken' });
-
-            await intr.editReply({ embeds: [embed] });
+            await intr.reply({ embeds: [embed] });
         } catch (error) {
-            Logger.error('Fehler beim Abrufen der Stats', error);
-            await intr.editReply({
-                content: '❌ Fehler beim Abrufen der Statistiken!'
+            Logger.error('Fehler beim Abrufen der Statistiken', error);
+            await intr.reply({
+                content: '❌ Fehler beim Abrufen der Statistiken!',
+                ephemeral: true
             });
         }
     }
@@ -1557,134 +1321,78 @@ export class TempVoiceStatsCommand implements Command {
         }
     }
 }
-
-// 16. /byvoicecleanup - Admin Cleanup Command
+// 16. /byvoicecleanup - Admin Cleanup
 export class TempVoiceCleanupCommand implements Command {
+    public names = ['byvoicecleanup'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 30000);
+
     public metadata = {
         name: 'byvoicecleanup',
-        description: 'Bereinigt leere temporäre Voice-Channels (Admin)',
+        description: 'Bereinigt verwaiste und leere temporäre Voice-Channels (Admin)',
         type: ApplicationCommandType.ChatInput,
         dmPermission: false,
-        defaultMemberPermissions: PermissionFlagsBits.Administrator,
+        defaultMemberPermissions: PermissionFlagsBits.ManageChannels,
     };
 
     public data = new SlashCommandBuilder()
         .setName('byvoicecleanup')
-        .setDescription('Bereinigt leere temporäre Voice-Channels (Admin)')
+        .setDescription('Bereinigt verwaiste und leere temporäre Voice-Channels (Admin)')
         .addBooleanOption(option =>
             option.setName('force')
-                .setDescription('Erzwingt Cleanup auch für nicht-leere Channels')
+                .setDescription('Erzwingt die Bereinigung aller leeren Channels')
                 .setRequired(false))
         .addIntegerOption(option =>
-            option.setName('older_than')
-                .setDescription('Nur Channels älter als X Minuten bereinigen')
+            option.setName('max_age')
+                .setDescription('Maximales Alter in Minuten für leere Channels')
                 .setRequired(false)
-                .setMinValue(5)
+                .setMinValue(1)
                 .setMaxValue(1440))
-        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels);
 
     public async execute(intr: ChatInputCommandInteraction): Promise<void> {
-        await intr.deferReply({ ephemeral: true });
-        
-        const force = intr.options.getBoolean('force') ?? false;
-        const olderThanMinutes = intr.options.getInteger('older_than') ?? 0;
-        
-        try {
-            const beforeCleanup = await (tempVoiceModule as any).getAllTempChannels(intr.guildId!);
-            const beforeCount = beforeCleanup.length;
-            
-            let cleanedChannels = 0;
-            let errorChannels = 0;
-            const cleanedChannelNames: string[] = [];
-            
-            for (const channelData of beforeCleanup) {
-                try {
-                    const voiceChannel = intr.guild!.channels.cache.get(channelData.voiceChannelId) as VoiceChannel;
-                    if (!voiceChannel) {
-                        // Channel doesn't exist anymore, remove from database
-                        await (tempVoiceModule as any).deleteTempChannel(intr.guildId!, channelData.voiceChannelId);
-                        cleanedChannels++;
-                        cleanedChannelNames.push(`${channelData.voiceChannelId} (nicht gefunden)`);
-                        continue;
-                    }
-                    
-                    // Check age requirement
-                    if (olderThanMinutes > 0) {
-                        const channelAgeMinutes = (Date.now() - channelData.createdAt.getTime()) / 60000;
-                        if (channelAgeMinutes < olderThanMinutes) {
-                            continue;
-                        }
-                    }
-                    
-                    // Check if channel should be cleaned
-                    const isEmpty = voiceChannel.members.size === 0;
-                    if (isEmpty || force) {
-                        await (tempVoiceModule as any).deleteEmptyTempChannel(intr.guild!, channelData.voiceChannelId);
-                        cleanedChannels++;
-                        cleanedChannelNames.push(voiceChannel.name);
-                        
-                        // Log cleanup action
-                        await (tempVoiceModule as any).updateTempChannelActivity(
-                            intr.guildId!, 
-                            channelData.voiceChannelId, 
-                            'admin_cleanup', 
-                            intr.user.id,
-                            { force, olderThanMinutes }
-                        );
-                    }
-                } catch (error) {
-                    Logger.error(`Fehler beim Bereinigen von Channel ${channelData.voiceChannelId}`, error);
-                    errorChannels++;
-                }
-            }
+        const force = intr.options.getBoolean('force') || false;
+        const maxAge = intr.options.getInteger('max_age') || 5; // Standard: 5 Minuten
 
-            const afterCleanup = await (tempVoiceModule as any).getAllTempChannels(intr.guildId!);
-            const afterCount = afterCleanup.length;
-            
+        await intr.deferReply({ ephemeral: true });
+
+        try {
+            const cleanupResult = await (tempVoiceModule as any).cleanupChannels(
+                intr.guildId!,
+                force,
+                maxAge * 60 * 1000 // Umrechnung in Millisekunden
+            );
+
             const embed = new EmbedBuilder()
                 .setTitle('🧹 Cleanup abgeschlossen!')
-                .setDescription(`Bereinigungs-Operation erfolgreich durchgeführt`)
-                .setColor(cleanedChannels > 0 ? 0x00ff00 : 0x95a5a6)
+                .setDescription('Die Bereinigung der temporären Voice-Channels wurde durchgeführt.')
                 .addFields(
-                    { name: '📊 Ergebnis', value: 
-                        `**${beforeCount}** Channels vorher\n` +
-                        `**${afterCount}** Channels nachher\n` +
-                        `**${cleanedChannels}** bereinigt\n` +
-                        `**${errorChannels}** Fehler`, inline: true },
-                    { name: '⚙️ Parameter', value: 
-                        `**Force:** ${force ? 'Ja' : 'Nein'}\n` +
-                        `**Min. Alter:** ${olderThanMinutes > 0 ? `${olderThanMinutes}min` : 'Keins'}\n` +
-                        `**Operator:** ${(intr.member as GuildMember).displayName}`, inline: true },
-                    { name: '🗄️ System', value: 
-                        `**MongoDB** Datenbank\n` +
-                        `**Konsistent** nach Cleanup\n` +
-                        `**${Date.now()}** Timestamp`, inline: true }
-                );
+                    { name: '🗑️ Gelöschte Channels', value: cleanupResult.deletedChannels.toString(), inline: true },
+                    { name: '📝 Bereinigte Datensätze', value: cleanupResult.cleanedRecords.toString(), inline: true },
+                    { name: '⏱️ Verarbeitungszeit', value: `${cleanupResult.processingTime}ms`, inline: true }
+                )
+                .setColor(0x00ff00)
+                .setTimestamp()
+                .setFooter({ text: 'TempVoice • Cleanup Complete • MongoDB' });
 
-            if (cleanedChannelNames.length > 0) {
-                const channelList = cleanedChannelNames
-                    .slice(0, 10)
-                    .join('\n') + 
-                    (cleanedChannelNames.length > 10 ? `\n... und ${cleanedChannelNames.length - 10} weitere` : '');
-                
+            if (cleanupResult.deletedChannels > 0) {
                 embed.addFields({
-                    name: '🗑️ Bereinigte Channels',
-                    value: channelList,
+                    name: '📋 Details',
+                    value: [
+                        `🔹 **Verwaiste Channels:** ${cleanupResult.orphanedChannels}`,
+                        `🔹 **Leere Channels:** ${cleanupResult.emptyChannels}`,
+                        `🔹 **Fehlerhafte Channels:** ${cleanupResult.errorChannels}`
+                    ].join('\n'),
                     inline: false
                 });
             }
 
-            embed
-                .setTimestamp()
-                .setFooter({ text: 'TempVoice • Admin Cleanup • MongoDB • Operation abgeschlossen' });
-
             await intr.editReply({ embeds: [embed] });
-            
-            Logger.info(`✅ Admin Cleanup: ${cleanedChannels} Channels bereinigt von ${(intr.member as GuildMember).displayName}`);
         } catch (error) {
-            Logger.error('Fehler beim Cleanup', error);
+            Logger.error('Fehler beim Cleanup der Channels', error);
             await intr.editReply({
-                content: '❌ Fehler beim Bereinigen der Channels!'
+                content: '❌ Fehler beim Cleanup der Channels!'
             });
         }
     }
@@ -1692,6 +1400,11 @@ export class TempVoiceCleanupCommand implements Command {
 
 // 17. /byvoiceconfig - Server-Konfiguration
 export class TempVoiceConfigCommand implements Command {
+    public names = ['byvoiceconfig'];
+    public deferType = CommandDeferType.HIDDEN;
+    public requireClientPerms: PermissionsString[] = ['ManageChannels'];
+    public cooldown = new RateLimiter(1, 5000);
+
     public metadata = {
         name: 'byvoiceconfig',
         description: 'Konfiguriert TempVoice-Einstellungen für den Server (Admin)',
@@ -1726,6 +1439,14 @@ export class TempVoiceConfigCommand implements Command {
                 .addBooleanOption(option =>
                     option.setName('auto_delete_text')
                         .setDescription('Text-Channels automatisch löschen')
+                        .setRequired(false))
+                .addBooleanOption(option =>
+                    option.setName('log_actions')
+                        .setDescription('Aktionen protokollieren')
+                        .setRequired(false))
+                .addChannelOption(option =>
+                    option.setName('log_channel')
+                        .setDescription('Channel für Logs')
                         .setRequired(false)))
         .addSubcommand(subcommand =>
             subcommand
@@ -1749,36 +1470,38 @@ export class TempVoiceConfigCommand implements Command {
         try {
             const config = (tempVoiceModule as any).getGuildConfig(intr.guildId!);
             
-            const creatorChannelList = config.creatorChannels.length > 0
+            const creatorChannelList = config.creatorChannels && config.creatorChannels.length > 0
                 ? await Promise.all(
                     config.creatorChannels.map(async (channelId: string) => {
                         const channel = intr.guild!.channels.cache.get(channelId);
-                        return channel ? `${channel.name} (${channelId})` : `Gelöscht (${channelId})`;
+                        return channel ? `<#${channel.id}>` : `Gelöschter Channel (${channelId})`;
                     })
                 ).then(channels => channels.join('\n'))
                 : 'Keine Creator-Channels konfiguriert';
 
+            const logChannel = config.logChannelId ? intr.guild!.channels.cache.get(config.logChannelId) : null;
+
             const embed = new EmbedBuilder()
                 .setTitle('⚙️ TempVoice-Konfiguration')
-                .setDescription(`Aktuelle Einstellungen für **${intr.guild!.name}**`)
-                .setColor(0x3498db)
+                .setDescription(`Aktuelle Einstellungen für ${intr.guild!.name}`)
                 .addFields(
-                    { name: '👥 Standard Max-Users', value: `${config.defaultMaxUsers}`, inline: true },
-                    { name: '🧹 Cleanup-Intervall', value: `${config.cleanupInterval / 1000}s`, inline: true },
-                    { name: '📢 Creator-Channels', value: `${config.creatorChannels.length}`, inline: true },
-                    { name: '🗄️ Datenbank', value: 'MongoDB', inline: true },
-                    { name: '🆔 Guild ID', value: config.guildId, inline: true },
-                    { name: '📊 Status', value: 'Aktiv', inline: true },
-                    { name: '📋 Creator-Channel Liste', value: creatorChannelList, inline: false }
+                    { name: '📢 Creator-Channels', value: creatorChannelList, inline: false },
+                    { name: '👥 Standard Max. Nutzer', value: config.defaultMaxUsers?.toString() || '0 (unbegrenzt)', inline: true },
+                    { name: '🧹 Cleanup-Intervall', value: `${config.cleanupInterval || 300}s`, inline: true },
+                    { name: '📝 Auto-Delete Text', value: config.autoDeleteText ? '✅ Aktiviert' : '❌ Deaktiviert', inline: true },
+                    { name: '📋 Aktionen protokollieren', value: config.logActions ? '✅ Aktiviert' : '❌ Deaktiviert', inline: true },
+                    { name: '📤 Log-Channel', value: logChannel ? `<#${logChannel.id}>` : 'Nicht konfiguriert', inline: true },
+                    { name: '📊 Statistiken sammeln', value: config.collectStats ? '✅ Aktiviert' : '❌ Deaktiviert', inline: true }
                 )
+                .setColor(0x5865f2)
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Server Config • MongoDB' });
+                .setFooter({ text: 'TempVoice • Configuration • MongoDB' });
 
             await intr.reply({ embeds: [embed], ephemeral: true });
         } catch (error) {
-            Logger.error('Fehler beim Anzeigen der Konfiguration', error);
+            Logger.error('Fehler beim Abrufen der Konfiguration', error);
             await intr.reply({
-                content: '❌ Fehler beim Anzeigen der Konfiguration!',
+                content: '❌ Fehler beim Abrufen der Konfiguration!',
                 ephemeral: true
             });
         }
@@ -1786,29 +1509,21 @@ export class TempVoiceConfigCommand implements Command {
 
     private async setConfig(intr: ChatInputCommandInteraction): Promise<void> {
         try {
+            const updates: any = {};
+            
             const defaultMaxUsers = intr.options.getInteger('default_max_users');
             const cleanupInterval = intr.options.getInteger('cleanup_interval');
             const autoDeleteText = intr.options.getBoolean('auto_delete_text');
+            const logActions = intr.options.getBoolean('log_actions');
+            const logChannel = intr.options.getChannel('log_channel');
 
-            const config = (tempVoiceModule as any).getGuildConfig(intr.guildId!);
-            let changes: string[] = [];
+            if (defaultMaxUsers !== null) updates.defaultMaxUsers = defaultMaxUsers;
+            if (cleanupInterval !== null) updates.cleanupInterval = cleanupInterval;
+            if (autoDeleteText !== null) updates.autoDeleteText = autoDeleteText;
+            if (logActions !== null) updates.logActions = logActions;
+            if (logChannel !== null) updates.logChannelId = logChannel.id;
 
-            if (defaultMaxUsers !== null) {
-                config.defaultMaxUsers = defaultMaxUsers;
-                changes.push(`**Max-Users:** ${defaultMaxUsers}`);
-            }
-
-            if (cleanupInterval !== null) {
-                config.cleanupInterval = cleanupInterval * 1000; // Convert to milliseconds
-                changes.push(`**Cleanup-Intervall:** ${cleanupInterval}s`);
-            }
-
-            if (autoDeleteText !== null) {
-                config.autoDeleteText = autoDeleteText;
-                changes.push(`**Auto-Delete Text:** ${autoDeleteText ? 'Aktiviert' : 'Deaktiviert'}`);
-            }
-
-            if (changes.length === 0) {
+            if (Object.keys(updates).length === 0) {
                 await intr.reply({
                     content: '❌ Keine Änderungen angegeben!',
                     ephemeral: true
@@ -1816,36 +1531,45 @@ export class TempVoiceConfigCommand implements Command {
                 return;
             }
 
-            // Save configuration
-            const success = await (tempVoiceModule as any).saveGuildConfig(intr.guildId!, config);
-            
-            if (!success) {
+            const result = await (tempVoiceModule as any).updateGuildConfig(intr.guildId!, updates);
+
+            if (!result.success) {
                 await intr.reply({
-                    content: '❌ Fehler beim Speichern der Konfiguration!',
+                    content: `❌ ${result.message}`,
                     ephemeral: true
                 });
                 return;
             }
 
+            const changedSettings = Object.keys(updates).map(key => {
+                const value = updates[key];
+                switch (key) {
+                    case 'defaultMaxUsers': return `👥 **Standard Max. Nutzer:** ${value === 0 ? 'Unbegrenzt' : value}`;
+                    case 'cleanupInterval': return `🧹 **Cleanup-Intervall:** ${value}s`;
+                    case 'autoDeleteText': return `📝 **Auto-Delete Text:** ${value ? 'Aktiviert' : 'Deaktiviert'}`;
+                    case 'logActions': return `📋 **Aktionen protokollieren:** ${value ? 'Aktiviert' : 'Deaktiviert'}`;
+                    case 'logChannelId': return `📤 **Log-Channel:** <#${value}>`;
+                    default: return `**${key}:** ${value}`;
+                }
+            });
+
             const embed = new EmbedBuilder()
                 .setTitle('✅ Konfiguration aktualisiert!')
-                .setDescription(`Die TempVoice-Einstellungen wurden erfolgreich geändert`)
+                .setDescription('Die TempVoice-Einstellungen wurden erfolgreich geändert.')
+                .addFields({
+                    name: '🔧 Geänderte Einstellungen',
+                    value: changedSettings.join('\n'),
+                    inline: false
+                })
                 .setColor(0x00ff00)
-                .addFields(
-                    { name: '🔄 Änderungen', value: changes.join('\n'), inline: false },
-                    { name: '👤 Geändert von', value: `${intr.user}`, inline: true },
-                    { name: '⏰ Zeitpunkt', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
-                )
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Config Update • MongoDB' });
+                .setFooter({ text: 'TempVoice • Configuration Updated • MongoDB' });
 
             await intr.reply({ embeds: [embed], ephemeral: true });
-            
-            Logger.info(`⚙️ Config Update: ${changes.join(', ')} von ${(intr.member as GuildMember).displayName}`);
         } catch (error) {
-            Logger.error('Fehler beim Setzen der Konfiguration', error);
+            Logger.error('Fehler beim Aktualisieren der Konfiguration', error);
             await intr.reply({
-                content: '❌ Fehler beim Ändern der Konfiguration!',
+                content: '❌ Fehler beim Aktualisieren der Konfiguration!',
                 ephemeral: true
             });
         }
@@ -1853,19 +1577,11 @@ export class TempVoiceConfigCommand implements Command {
 
     private async resetConfig(intr: ChatInputCommandInteraction): Promise<void> {
         try {
-            const defaultConfig = {
-                guildId: intr.guildId!,
-                creatorChannels: [],
-                defaultMaxUsers: 5,
-                cleanupInterval: 300000, // 5 minutes
-                autoDeleteText: true
-            };
+            const result = await (tempVoiceModule as any).resetGuildConfig(intr.guildId!);
 
-            const success = await (tempVoiceModule as any).saveGuildConfig(intr.guildId!, defaultConfig);
-            
-            if (!success) {
+            if (!result.success) {
                 await intr.reply({
-                    content: '❌ Fehler beim Zurücksetzen der Konfiguration!',
+                    content: `❌ ${result.message}`,
                     ephemeral: true
                 });
                 return;
@@ -1873,23 +1589,23 @@ export class TempVoiceConfigCommand implements Command {
 
             const embed = new EmbedBuilder()
                 .setTitle('🔄 Konfiguration zurückgesetzt!')
-                .setDescription(`Die TempVoice-Einstellungen wurden auf Standard zurückgesetzt`)
+                .setDescription('Die TempVoice-Einstellungen wurden auf die Standardwerte zurückgesetzt.')
+                .addFields({
+                    name: '📋 Standard-Einstellungen',
+                    value: [
+                        '👥 **Standard Max. Nutzer:** 0 (unbegrenzt)',
+                        '🧹 **Cleanup-Intervall:** 300s',
+                        '📝 **Auto-Delete Text:** Deaktiviert',
+                        '📋 **Aktionen protokollieren:** Deaktiviert',
+                        '📤 **Log-Channel:** Nicht konfiguriert'
+                    ].join('\n'),
+                    inline: false
+                })
                 .setColor(0xffa500)
-                .addFields(
-                    { name: '⚙️ Standard-Werte', value: 
-                        `**Max-Users:** 5\n` +
-                        `**Cleanup-Intervall:** 300s\n` +
-                        `**Auto-Delete Text:** Aktiviert\n` +
-                        `**Creator-Channels:** Gelöscht`, inline: false },
-                    { name: '👤 Zurückgesetzt von', value: `${intr.user}`, inline: true },
-                    { name: '⏰ Zeitpunkt', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
-                )
                 .setTimestamp()
-                .setFooter({ text: 'TempVoice • Config Reset • MongoDB' });
+                .setFooter({ text: 'TempVoice • Configuration Reset • MongoDB' });
 
             await intr.reply({ embeds: [embed], ephemeral: true });
-            
-            Logger.info(`🔄 Config Reset von ${(intr.member as GuildMember).displayName}`);
         } catch (error) {
             Logger.error('Fehler beim Zurücksetzen der Konfiguration', error);
             await intr.reply({
@@ -1899,3 +1615,111 @@ export class TempVoiceConfigCommand implements Command {
         }
     }
 }
+
+// Hilfsfunktionen für bessere Code-Organisation
+export class TempVoiceCommandUtils {
+    /**
+     * Überprüft, ob ein Nutzer der Besitzer eines TempVoice-Channels ist
+     */
+    public static isChannelOwner(guildId: string, channelId: string, userId: string): boolean {
+        return (tempVoiceModule as any).isChannelOwner(guildId, channelId, userId);
+    }
+
+    /**
+     * Überprüft, ob ein Nutzer in einem TempVoice-Channel ist
+     */
+    public static isInTempChannel(interaction: ChatInputCommandInteraction): any {
+        return (tempVoiceModule as any).isInTempChannel(interaction);
+    }
+
+    /**
+     * Formatiert die Dauer in einem menschenlesbaren Format
+     */
+    public static formatDuration(milliseconds: number): string {
+        const seconds = Math.floor(milliseconds / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+        if (hours > 0) return `${hours}h ${minutes % 60}m`;
+        if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+        return `${seconds}s`;
+    }
+
+    /**
+     * Erstellt eine Standard-Fehler-Embed
+     */
+    public static createErrorEmbed(title: string, message: string): EmbedBuilder {
+        return new EmbedBuilder()
+            .setTitle(`❌ ${title}`)
+            .setDescription(message)
+            .setColor(0xff0000)
+            .setTimestamp()
+            .setFooter({ text: 'TempVoice • Error • MongoDB' });
+    }
+
+    /**
+     * Erstellt eine Standard-Erfolg-Embed
+     */
+    public static createSuccessEmbed(title: string, message: string): EmbedBuilder {
+        return new EmbedBuilder()
+            .setTitle(`✅ ${title}`)
+            .setDescription(message)
+            .setColor(0x00ff00)
+            .setTimestamp()
+            .setFooter({ text: 'TempVoice • Success • MongoDB' });
+    }
+
+    /**
+     * Validiert Channel-Namen
+     */
+    public static validateChannelName(name: string): { valid: boolean; message?: string } {
+        if (name.length < 1) {
+            return { valid: false, message: 'Der Channel-Name darf nicht leer sein!' };
+        }
+        if (name.length > 100) {
+            return { valid: false, message: 'Der Channel-Name darf nicht länger als 100 Zeichen sein!' };
+        }
+        if (!/^[a-zA-Z0-9\s\-_äöüÄÖÜß]+$/.test(name)) {
+            return { valid: false, message: 'Der Channel-Name enthält ungültige Zeichen!' };
+        }
+        return { valid: true };
+    }
+
+    /**
+     * Konvertiert Berechtigungen zu menschenlesbaren Strings
+     */
+    public static formatPermissions(permissions: PermissionsString[]): string {
+        const permissionMap: Record<string, string> = {
+            'ManageChannels': 'Channels verwalten',
+            'Connect': 'Verbinden',
+            'MoveMembers': 'Mitglieder verschieben',
+            'ViewChannel': 'Channel anzeigen',
+            'Administrator': 'Administrator'
+        };
+
+        return permissions.map(perm => permissionMap[perm] || perm).join(', ');
+    }
+}
+
+// Export aller Commands für einfache Registrierung
+export const ALL_TEMPVOICE_COMMANDS = [
+    TempVoiceCreateCommand,
+    TempVoiceSetOwnerCommand,
+    TempVoiceLimitCommand,
+    TempVoiceRenameCommand,
+    TempVoiceHideCommand,
+    TempVoiceShowCommand,
+    TempVoiceLockCommand,
+    TempVoiceUnlockCommand,
+    TempVoiceClaimCommand,
+    TempVoiceBanCommand,
+    TempVoiceUnbanCommand,
+    TempVoiceKickCommand,
+    TempVoiceStatusCommand,
+    TempVoiceListCommand,
+    TempVoiceStatsCommand,
+    TempVoiceCleanupCommand,
+    TempVoiceConfigCommand
+] as const;

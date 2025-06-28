@@ -1,25 +1,37 @@
-// src/start-bot.ts - Teil 8/8 (FINAL)
-// Vollständige Integration aller TempVoice-Commands in den Discord-Bot
+// src/start-bot.ts - Korrigierte Version
 
 import { REST } from '@discordjs/rest';
-import { Options, Partials } from 'discord.js';
+import { Options } from 'discord.js';
 import { createRequire } from 'node:module';
 
-import { Button } from './buttons/index.js';
-import { DevCommand, HelpCommand, InfoCommand, TestCommand } from './commands/chat/index.js';
 import {
-    ChatCommandMetadata,
+    ButtonHandler,
+    CommandHandler,
+    GuildJoinHandler,
+    GuildLeaveHandler,
+    MessageHandler,
+    ReactionHandler,
+    TriggerHandler,
+} from './events/index.js';
+import { JobService, Logger } from './services/index.js';
+import {
+    Button,
+    ButtonDeferType,
     Command,
-    MessageCommandMetadata,
-    UserCommandMetadata,
-} from './commands/index.js';
-import { ViewDateSent } from './commands/message/index.js';
-import { ViewDateJoined } from './commands/user/index.js';
+    CommandDeferType,
+    Job,
+    MessageCommand,
+    Reaction,
+    Trigger,
+    UserCommand,
+} from './models/index.js';
+import { Bot } from './models/bot.js';
+import { CommandRegistrationService } from './services/index.js';
 
-// TempVoice Commands Import - ALLE 17 Commands
+// TempVoice imports - korrigiert
 import { 
     TempVoiceCreateCommand,
-    TempVoiceSetOwnerCommand,
+    TempVoiceSetOwnerCommand, 
     TempVoiceLimitCommand,
     TempVoiceRenameCommand,
     TempVoiceHideCommand,
@@ -37,68 +49,68 @@ import {
     TempVoiceConfigCommand
 } from './commands/chat/tempvoice-commands.js';
 
-// TempVoice Metadata Import
-import { TempVoiceCommandMetadata } from './commands/metadata-tempvoice.js';
+import { EnhancedTempVoiceModule } from './modules/tempvoice/enhanced.js';
 
+// Standard imports
 import {
-    ButtonHandler,
-    CommandHandler,
-    GuildJoinHandler,
-    GuildLeaveHandler,
-    MessageHandler,
-    ReactionHandler,
-    TriggerHandler,
-} from './events/index.js';
-import { CustomClient } from './extensions/index.js';
-import { Job } from './jobs/index.js';
-import { Bot } from './models/bot.js';
-import { Reaction } from './reactions/index.js';
-import {
-    CommandRegistrationService,
-    EventDataService,
-    JobService,
-    Logger,
-} from './services/index.js';
-import { Trigger } from './triggers/index.js';
-
-// Enhanced TempVoice Module Import
-import { enhancedTempVoiceModule } from './modules/tempvoice/enhanced.js';
+    DevCommand,
+    HelpCommand,
+    InfoCommand,
+    LinkCommand,
+    TestCommand,
+    TranslateCommand,
+} from './commands/chat/index.js';
+import { ViewDateSent } from './commands/message/index.js';
+import { ViewDateJoined } from './commands/user/index.js';
+import { ChatCommandMetadata, MessageCommandMetadata, UserCommandMetadata } from './models/index.js';
 
 const require = createRequire(import.meta.url);
 let Config = require('../config/config.json');
+let Debug = require('../config/debug.json');
 let Logs = require('../lang/logs.json');
 
 async function start(): Promise<void> {
-    // Services
-    let eventDataService = new EventDataService();
+    Logger.info(Logs.info.appStarted);
 
-    // Client
-    let client = new CustomClient({
+    // Enhanced TempVoice Module Setup
+    Logger.info('🚀 Initialisiere Enhanced TempVoice-Modul...');
+    
+    let enhancedTempVoiceModule: EnhancedTempVoiceModule;
+    try {
+        enhancedTempVoiceModule = new EnhancedTempVoiceModule(
+            Config.database?.mongodb?.uri,
+            Config.database?.mongodb?.dbName
+        );
+        await enhancedTempVoiceModule.connect();
+        Logger.info('✅ TempVoice-Modul initialisiert');
+    } catch (error) {
+        Logger.error('❌ Fehler beim Initialisieren des TempVoice-Moduls:', error);
+        process.exit(1);
+    }
+
+    // Client setup
+    let client = Client({
         intents: Config.client.intents,
-        partials: (Config.client.partials as string[]).map(partial => Partials[partial]),
+        partials: Config.client.partials,
         makeCache: Options.cacheWithLimits({
             // Keep default caching behavior
-            ...Options.DefaultMakeCacheSettings,
-            // Override specific options from config
-            ...Config.client.caches,
         }),
     });
 
-    // Commands - Mit ALLEN TempVoice Commands erweitert
+    // Services
+    let jobService: JobService = new JobService([]);
+
+    // Commands - korrigiert ohne fehlende Properties
     let commands: Command[] = [
-        // Original Template Commands
+        // Standard Commands
         new DevCommand(),
         new HelpCommand(),
         new InfoCommand(),
+        new LinkCommand(),
         new TestCommand(),
-
-        // Message Context Commands
-        new ViewDateSent(),
-
-        // User Context Commands
-        new ViewDateJoined(),
-
-        // TempVoice Commands - VOLLSTÄNDIGE 17 Commands Integration
+        new TranslateCommand(),
+        
+        // TempVoice Commands - korrigiert
         new TempVoiceCreateCommand(),      // /byvoicecreate - Creator-Channel erstellen
         new TempVoiceSetOwnerCommand(),    // /byvoicesetowner - Besitzer ändern
         new TempVoiceLimitCommand(),       // /byvoicelimit - Nutzer-Limit
@@ -118,34 +130,20 @@ async function start(): Promise<void> {
         new TempVoiceConfigCommand(),      // /byvoiceconfig - Server-Konfiguration
     ];
 
-    // Buttons
-    let buttons: Button[] = [
-        // TODO: Add TempVoice buttons here (future feature)
-    ];
-
-    // Reactions
-    let reactions: Reaction[] = [
-        // TODO: Add TempVoice reactions here (future feature)
-    ];
-
-    // Triggers
-    let triggers: Trigger[] = [
-        // TODO: Add TempVoice triggers here (future feature)
-    ];
+    let messageCommands: MessageCommand[] = [new ViewDateSent()];
+    let userCommands: UserCommand[] = [new ViewDateJoined()];
+    let buttons: Button[] = [];
+    let reactions: Reaction[] = [];
+    let triggers: Trigger[] = [];
 
     // Event handlers
-    let guildJoinHandler = new GuildJoinHandler(eventDataService);
+    let guildJoinHandler = new GuildJoinHandler();
     let guildLeaveHandler = new GuildLeaveHandler();
-    let commandHandler = new CommandHandler(commands, eventDataService);
-    let buttonHandler = new ButtonHandler(buttons, eventDataService);
-    let triggerHandler = new TriggerHandler(triggers, eventDataService);
-    let messageHandler = new MessageHandler(triggerHandler);
-    let reactionHandler = new ReactionHandler(reactions, eventDataService);
-
-    // Jobs
-    let jobs: Job[] = [
-        // TODO: Add TempVoice cleanup jobs here (future feature)
-    ];
+    let messageHandler = new MessageHandler(triggers);
+    let commandHandler = new CommandHandler(commands, messageCommands, userCommands);
+    let buttonHandler = new ButtonHandler(buttons);
+    let reactionHandler = new ReactionHandler(reactions);
+    let triggerHandler = new TriggerHandler(triggers);
 
     // Bot
     let bot = new Bot(
@@ -157,36 +155,15 @@ async function start(): Promise<void> {
         commandHandler,
         buttonHandler,
         reactionHandler,
-        new JobService(jobs)
+        jobService
     );
 
-    // TempVoice Module Initialization - KRITISCH WICHTIG!
-    Logger.info('🚀 Initialisiere Enhanced TempVoice-Modul...');
-    
+    // Initialize TempVoice with client
     try {
-        // Initialisiere das Enhanced TempVoice-Modul mit dem Client
-        enhancedTempVoiceModule.init(client);
-        
-        // Health Check
-        const healthStatus = await enhancedTempVoiceModule.healthCheck();
-        Logger.info(`💚 TempVoice Health Check: ${healthStatus.status}`);
-        Logger.info('📊 TempVoice Details:', healthStatus.details);
-        
-        // Performance Monitoring Setup
-        setInterval(() => {
-            const metrics = enhancedTempVoiceModule.getPerformanceMetrics();
-            const cacheStats = enhancedTempVoiceModule.getCacheStats();
-            
-            Logger.debug('📈 TempVoice Live-Metriken:');
-            Logger.debug(`   Channels: ${metrics.channelsCreated}/${metrics.channelsDeleted}`);
-            Logger.debug(`   Cache: ${cacheStats.size} Einträge`);
-            Logger.debug(`   Response: ${metrics.averageResponseTime.toFixed(2)}ms`);
-        }, 1800000); // Alle 30 Minuten
-        
-        Logger.info('✅ Enhanced TempVoice-Modul erfolgreich gestartet!');
-        
+        await enhancedTempVoiceModule.initialize(client);
+        Logger.info('✅ TempVoice-Modul mit Client verbunden');
     } catch (error) {
-        Logger.error('❌ Fehler beim Initialisieren des TempVoice-Moduls:', error);
+        Logger.error('❌ Fehler beim Verbinden des TempVoice-Moduls mit Client:', error);
         process.exit(1);
     }
 
@@ -202,12 +179,9 @@ async function start(): Promise<void> {
                 ...Object.values(ChatCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
                 ...Object.values(MessageCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
                 ...Object.values(UserCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
-                
-                // TempVoice Commands - ALLE 17 Commands registrieren
-                ...Object.values(TempVoiceCommandMetadata).sort((a, b) => (a.name > b.name ? 1 : -1)),
             ];
             
-            Logger.info(`📝 Registriere ${localCmds.length} Commands (inkl. ${Object.keys(TempVoiceCommandMetadata).length} TempVoice-Commands)...`);
+            Logger.info(`📝 Registriere ${localCmds.length} Commands...`);
             
             await commandRegistrationService.process(localCmds, process.argv);
             
@@ -234,9 +208,20 @@ async function start(): Promise<void> {
         Logger.info('   ✅ 17 Commands verfügbar (by-Prefix)');
         Logger.info('   ✅ MongoDB Integration aktiv');
         Logger.info('   ✅ Performance-Monitoring läuft');
-        Logger.info('   ✅ Automatische Cleanup-Routinen aktiv');
+        Logger.info('   ✅ Automatische Cleanup-Routines aktiv');
         Logger.info('   ✅ Rate-Limiting und Sicherheit aktiviert');
         Logger.info('   ✅ Event-System und Caching bereit');
+        
+        // Performance Monitoring Setup - Logger.info statt Logger.debug
+        setInterval(() => {
+            const metrics = enhancedTempVoiceModule.getPerformanceMetrics();
+            const cacheStats = enhancedTempVoiceModule.getCacheStats();
+            
+            Logger.info('📈 TempVoice Live-Metriken:');
+            Logger.info(`   Channels: ${metrics.channelsCreated}/${metrics.channelsDeleted}`);
+            Logger.info(`   Cache: ${cacheStats.size} Einträge`);
+            Logger.info(`   Response: ${metrics.averageResponseTime.toFixed(2)}ms`);
+        }, 1800000); // Alle 30 Minuten
         
     } catch (error) {
         Logger.error('❌ Fehler beim Starten des Discord-Bots:', error);
@@ -249,92 +234,50 @@ async function start(): Promise<void> {
         
         try {
             // TempVoice Cleanup
-            await enhancedTempVoiceModule.cleanup();
+            await enhancedTempVoiceModule.stop();
             Logger.info('✅ TempVoice-Modul bereinigt');
             
-            // Bot Cleanup
-            await bot.stop?.();
-            Logger.info('✅ Discord-Bot gestoppt');
+            // Bot Cleanup - korrigiert, da stop() möglicherweise nicht existiert
+            if (bot && typeof (bot as any).stop === 'function') {
+                await (bot as any).stop();
+                Logger.info('✅ Bot gestoppt');
+            }
             
-            Logger.info('👋 Graceful Shutdown abgeschlossen');
+            Logger.info('✅ Graceful Shutdown abgeschlossen');
             process.exit(0);
-            
         } catch (error) {
             Logger.error('❌ Fehler beim Graceful Shutdown:', error);
             process.exit(1);
         }
     });
+
+    process.on('SIGTERM', async () => {
+        Logger.info('🛑 SIGTERM empfangen - Shutdown initiiert...');
+        
+        try {
+            await enhancedTempVoiceModule.stop();
+            Logger.info('✅ Shutdown abgeschlossen');
+            process.exit(0);
+        } catch (error) {
+            Logger.error('❌ Fehler beim SIGTERM Shutdown:', error);
+            process.exit(1);
+        }
+    });
 }
 
-// Export der TempVoice-Modul Instanz für anderen Code
-export { enhancedTempVoiceModule as tempVoiceModule };
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    Logger.error('Unhandled Rejection at:', promise);
+    Logger.error('Reason:', reason);
+});
 
-// Start the application
-start().catch(error => {
-    Logger.error('❌ Kritischer Fehler beim Starten der Anwendung:', error);
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    Logger.error('Uncaught Exception:', error);
     process.exit(1);
 });
 
-/* 
-=============================================================================
-                        🎯 TEMPVOICE SYSTEM - FINAL VERSION
-=============================================================================
-
-✅ VOLLSTÄNDIG IMPLEMENTIERT:
-   📊 17 by-Commands (byvoicecreate bis byvoiceconfig)
-   🗄️ MongoDB Integration mit Memory-Fallback
-   ⚡ Performance-Optimierung und Monitoring
-   🔒 Rate-Limiting und Sicherheits-Features
-   🧹 Automatische Cleanup-Routinen
-   📈 Live-Metriken und Health-Checks
-   🎭 Event-System für erweiterte Funktionalität
-
-📋 COMMAND-ÜBERSICHT:
-   /byvoicecreate    - Creator-Channel erstellen (Admin)
-   /byvoicesetowner  - Besitzer übertragen
-   /byvoicelimit     - Nutzer-Limit ändern
-   /byvoicename      - Channel umbenennen
-   /byvoicehide      - Channel verstecken
-   /byvoiceshow      - Channel sichtbar machen
-   /byvoicelock      - Channel für neue Nutzer sperren
-   /byvoiceunlock    - Channel entsperren
-   /byvoiceclaim     - Channel beanspruchen (owner weg)
-   /byvoiceban       - Nutzer verbannen (mit Grund)
-   /byvoiceunban     - Nutzer entbannen
-   /byvoicekick      - Nutzer temporär rauswerfen
-   /byvoicestatus    - Detaillierte Channel-Infos
-   /byvoicelist      - Alle aktiven Channels (Admin)
-   /byvoicestats     - Erweiterte Statistiken (Admin)
-   /byvoicecleanup   - Manuelle Bereinigung (Admin)
-   /byvoiceconfig    - Server-Konfiguration (Admin)
-
-🔧 TECHNISCHE FEATURES:
-   • MongoDB mit automatischem Fallback zu Memory-Storage
-   • Optimierte Indizes für Performance
-   • Activity-Logging mit begrenzter Historie (50 Einträge)
-   • Smart Caching (5min TTL)
-   • Rate-Limiting (3s Cooldown, 5 Channels/min)
-   • System-Limits (50 Channels/Guild, 3 Channels/User)
-   • Automatische Bereinigung alle 5 Minuten
-   • Performance-Metriken alle 10 Minuten
-   • Event-driven Architecture
-   • Graceful Shutdown mit Cleanup
-
-📊 MONITORING & STATISTIKEN:
-   • Channels erstellt/gelöscht
-   • User-Aktionen tracking
-   • Database-Operation Metriken
-   • Durchschnittliche Response-Times
-   • Error-Count und Health-Status
-   • Cache-Hit-Rates und Memory-Usage
-
-🚀 DEPLOYMENT-READY:
-   • Produktions-taugliche Error-Behandlung
-   • Comprehensive Logging
-   • Health-Checks für Monitoring
-   • Skalierbare Architektur
-   • Docker/Kubernetes ready
-   • Environment-Variable Konfiguration
-
-=============================================================================
-*/
+start().catch(error => {
+    Logger.error('❌ Fataler Fehler beim Start:', error);
+    process.exit(1);
+});

@@ -1,9 +1,8 @@
-// src/modules/tempvoice/storage.ts - Teil 6/8
-// MongoDB Storage Implementation für TempVoice
+// src/modules/tempvoice/storage.ts - Korrigierte MongoDB Storage Implementation
 
 import { MongoClient, Db, Collection } from 'mongodb';
 import { Logger } from '../../services/index.js';
-import { TempVoiceCore } from './core.js';
+import { TempVoiceCore } from './cote.js'; // Korrigierter Import
 
 interface TempChannelDocument {
     _id?: string;
@@ -29,6 +28,9 @@ interface GuildConfigDocument {
     defaultMaxUsers: number;
     cleanupInterval: number;
     autoDeleteText: boolean;
+    logChannelId?: string;
+    logActions: boolean;
+    collectStats: boolean;
     lastCleanup: Date;
     settings: {
         allowUserLimit: boolean;
@@ -57,7 +59,7 @@ interface DatabaseStats {
 }
 
 export class MongoDBStorage extends TempVoiceCore {
-    private client: MongoClient | null = null;
+    private mongoClient: MongoClient | null = null; // Renamed to avoid conflict
     private db: Db | null = null;
     private tempChannelsCollection: Collection<TempChannelDocument> | null = null;
     private guildConfigsCollection: Collection<GuildConfigDocument> | null = null;
@@ -69,48 +71,46 @@ export class MongoDBStorage extends TempVoiceCore {
     private memoryChannels = new Map<string, Map<string, TempChannelDocument>>();
     private memoryConfigs = new Map<string, GuildConfigDocument>();
 
-    constructor(connectionString?: string, databaseName: string = 'discord_bot') {
+    constructor(connectionString?: string, databaseName?: string) {
         super();
-        this.connectionString = connectionString || process.env.MONGODB_URI || '';
-        this.databaseName = databaseName;
-        
-        if (this.connectionString) {
-            this.initializeDatabase();
-        } else {
-            Logger.warn('⚠️ Keine MongoDB-Verbindung konfiguriert, verwende Memory-Storage');
-        }
+        this.connectionString = connectionString || process.env.MONGODB_URI || 'mongodb://localhost:27017';
+        this.databaseName = databaseName || process.env.MONGODB_DB_NAME || 'borety_bot';
     }
 
-    // Database Initialization
-    private async initializeDatabase(): Promise<void> {
+    // Connection management
+    public async connect(): Promise<void> {
         try {
-            Logger.info('🔄 Verbinde mit MongoDB...');
+            this.mongoClient = new MongoClient(this.connectionString);
+            await this.mongoClient.connect();
             
-            this.client = new MongoClient(this.connectionString, {
-                maxPoolSize: 10,
-                serverSelectionTimeoutMS: 5000,
-                socketTimeoutMS: 45000,
-            });
-
-            await this.client.connect();
-            this.db = this.client.db(this.databaseName);
-            
-            // Initialize Collections
+            this.db = this.mongoClient.db(this.databaseName);
             this.tempChannelsCollection = this.db.collection<TempChannelDocument>('tempChannels');
             this.guildConfigsCollection = this.db.collection<GuildConfigDocument>('guildConfigs');
 
-            // Create Indexes
+            // Create indexes for better performance
             await this.createIndexes();
             
             this.isConnected = true;
-            Logger.info('✅ MongoDB erfolgreich verbunden und initialisiert');
-            
-            // Migrate memory data if exists
-            await this.migrateMemoryToDatabase();
-            
+            Logger.info('✅ MongoDB Storage connected successfully');
         } catch (error) {
-            Logger.error('❌ MongoDB-Verbindung fehlgeschlagen, verwende Memory-Storage', error);
+            Logger.error('❌ MongoDB connection failed, falling back to memory storage', error);
             this.isConnected = false;
+        }
+    }
+
+    public async disconnect(): Promise<void> {
+        try {
+            if (this.mongoClient) {
+                await this.mongoClient.close();
+                this.mongoClient = null;
+                this.db = null;
+                this.tempChannelsCollection = null;
+                this.guildConfigsCollection = null;
+                this.isConnected = false;
+                Logger.info('✅ MongoDB Storage disconnected');
+            }
+        } catch (error) {
+            Logger.error('❌ Error disconnecting from MongoDB', error);
         }
     }
 
@@ -118,63 +118,37 @@ export class MongoDBStorage extends TempVoiceCore {
         try {
             if (!this.tempChannelsCollection || !this.guildConfigsCollection) return;
 
-            // TempChannels Indexes
+            // TempChannels indexes
             await this.tempChannelsCollection.createIndex({ guildId: 1, voiceChannelId: 1 }, { unique: true });
             await this.tempChannelsCollection.createIndex({ guildId: 1 });
             await this.tempChannelsCollection.createIndex({ ownerId: 1 });
             await this.tempChannelsCollection.createIndex({ createdAt: 1 });
             await this.tempChannelsCollection.createIndex({ lastActivity: 1 });
-            await this.tempChannelsCollection.createIndex({ 'activityLog.timestamp': 1 });
 
-            // GuildConfigs Indexes
+            // GuildConfigs indexes
             await this.guildConfigsCollection.createIndex({ guildId: 1 }, { unique: true });
-            await this.guildConfigsCollection.createIndex({ 'creatorChannels': 1 });
 
-            Logger.info('📊 MongoDB-Indexe erfolgreich erstellt');
+            Logger.info('✅ MongoDB indexes created successfully');
         } catch (error) {
-            Logger.error('Fehler beim Erstellen der MongoDB-Indexe', error);
+            Logger.error('❌ Error creating MongoDB indexes', error);
         }
     }
 
-    private async migrateMemoryToDatabase(): Promise<void> {
-        if (!this.isConnected || this.memoryChannels.size === 0) return;
-
-        try {
-            Logger.info('🔄 Migriere Memory-Daten zu MongoDB...');
-            let migratedCount = 0;
-
-            for (const [guildId, guildChannels] of this.memoryChannels) {
-                for (const [channelId, channelData] of guildChannels) {
-                    await this.setTempChannelInDatabase(guildId, channelId, channelData);
-                    migratedCount++;
-                }
-            }
-
-            for (const [guildId, configData] of this.memoryConfigs) {
-                await this.saveGuildConfigInDatabase(guildId, configData);
-            }
-
-            // Clear memory after successful migration
-            this.memoryChannels.clear();
-            this.memoryConfigs.clear();
-
-            Logger.info(`✅ ${migratedCount} Channels erfolgreich zu MongoDB migriert`);
-        } catch (error) {
-            Logger.error('Fehler bei der Migration zu MongoDB', error);
-        }
-    }
-
-    // TempChannel CRUD Operations
+    // Implementation of abstract methods from TempVoiceCore
     protected getTempChannel(guildId: string, channelId: string): TempChannelDocument | null {
         if (this.isConnected) {
-            // For synchronous access, we'll need to implement caching
-            // For now, return from memory fallback
-            const guildChannels = this.memoryChannels.get(guildId);
-            return guildChannels?.get(channelId) || null;
+            // For real-time access, we use memory cache
+            // Database queries would be too slow for frequent access
+            return this.getTempChannelFromMemory(guildId, channelId);
         } else {
-            const guildChannels = this.memoryChannels.get(guildId);
-            return guildChannels?.get(channelId) || null;
+            return this.getTempChannelFromMemory(guildId, channelId);
         }
+    }
+
+    private getTempChannelFromMemory(guildId: string, channelId: string): TempChannelDocument | null {
+        const guildChannels = this.memoryChannels.get(guildId);
+        if (!guildChannels) return null;
+        return guildChannels.get(channelId) || null;
     }
 
     protected async setTempChannel(guildId: string, channelId: string, data: TempChannelDocument): Promise<void> {
@@ -232,7 +206,7 @@ export class MongoDBStorage extends TempVoiceCore {
 
             await this.tempChannelsCollection.deleteOne({ guildId, voiceChannelId: channelId });
             
-            // Also remove from memory cache
+            // Also remove from memory
             await this.deleteTempChannelFromMemory(guildId, channelId);
         } catch (error) {
             Logger.error('Fehler beim Löschen des TempChannels aus MongoDB', error);
@@ -255,7 +229,7 @@ export class MongoDBStorage extends TempVoiceCore {
         if (this.isConnected) {
             return await this.getAllTempChannelsFromDatabase(guildId);
         } else {
-            return await this.getAllTempChannelsFromMemory(guildId);
+            return this.getAllTempChannelsFromMemory(guildId);
         }
     }
 
@@ -265,115 +239,157 @@ export class MongoDBStorage extends TempVoiceCore {
 
             const channels = await this.tempChannelsCollection.find({ guildId }).toArray();
             
-            // Update memory cache
-            const guildChannels = new Map<string, TempChannelDocument>();
-            channels.forEach(channel => {
-                guildChannels.set(channel.voiceChannelId, channel);
-            });
-            this.memoryChannels.set(guildId, guildChannels);
+            // Also update memory cache
+            for (const channel of channels) {
+                this.setTempChannelInMemory(guildId, channel.voiceChannelId, channel);
+            }
             
             return channels;
         } catch (error) {
-            Logger.error('Fehler beim Abrufen der TempChannels aus MongoDB', error);
-            return await this.getAllTempChannelsFromMemory(guildId);
+            Logger.error('Fehler beim Abrufen aller TempChannels aus MongoDB', error);
+            return this.getAllTempChannelsFromMemory(guildId);
         }
     }
 
-    private async getAllTempChannelsFromMemory(guildId: string): Promise<TempChannelDocument[]> {
+    private getAllTempChannelsFromMemory(guildId: string): TempChannelDocument[] {
         const guildChannels = this.memoryChannels.get(guildId);
         return guildChannels ? Array.from(guildChannels.values()) : [];
     }
 
-    // Guild Config Operations
     protected getGuildConfig(guildId: string): GuildConfigDocument {
         if (this.isConnected) {
-            // Use memory cache or fetch from database
-            let config = this.memoryConfigs.get(guildId);
-            if (!config) {
-                // Async fetch would be needed here, for now use default
-                config = this.getDefaultGuildConfig(guildId);
-                this.memoryConfigs.set(guildId, config);
-            }
-            return config;
+            // Use memory cache for quick access
+            return this.getGuildConfigFromMemory(guildId);
         } else {
-            let config = this.memoryConfigs.get(guildId);
-            if (!config) {
-                config = this.getDefaultGuildConfig(guildId);
-                this.memoryConfigs.set(guildId, config);
-            }
-            return config;
+            return this.getGuildConfigFromMemory(guildId);
         }
     }
 
-    private getDefaultGuildConfig(guildId: string): GuildConfigDocument {
-        return {
+    private getGuildConfigFromMemory(guildId: string): GuildConfigDocument {
+        const existing = this.memoryConfigs.get(guildId);
+        if (existing) return existing;
+
+        // Return default config
+        const defaultConfig: GuildConfigDocument = {
             guildId,
             creatorChannels: [],
-            defaultMaxUsers: 5,
-            cleanupInterval: 300000, // 5 minutes
-            autoDeleteText: true,
+            defaultMaxUsers: 0,
+            cleanupInterval: 300, // 5 minutes
+            autoDeleteText: false,
+            logActions: false,
+            collectStats: true,
             lastCleanup: new Date(),
             settings: {
                 allowUserLimit: true,
                 allowRename: true,
                 allowVisibilityToggle: true,
                 allowLocking: true,
-                maxBannedUsers: 50,
+                maxBannedUsers: 20,
                 maxChannelLifetime: 86400000 // 24 hours
             }
         };
+
+        this.memoryConfigs.set(guildId, defaultConfig);
+        return defaultConfig;
     }
 
-    protected async saveGuildConfig(guildId: string, configData: Partial<GuildConfigDocument>): Promise<boolean> {
-        if (this.isConnected) {
-            return await this.saveGuildConfigInDatabase(guildId, configData);
-        } else {
-            return await this.saveGuildConfigInMemory(guildId, configData);
-        }
-    }
-
-    private async saveGuildConfigInDatabase(guildId: string, configData: Partial<GuildConfigDocument>): Promise<boolean> {
+    protected async saveGuildConfig(guildId: string, config: GuildConfigDocument): Promise<boolean> {
         try {
-            if (!this.guildConfigsCollection) throw new Error('GuildConfigs collection not initialized');
-
-            const updateData = {
-                ...configData,
-                guildId,
-                lastUpdated: new Date()
-            };
-
-            await this.guildConfigsCollection.replaceOne(
-                { guildId },
-                updateData as GuildConfigDocument,
-                { upsert: true }
-            );
-
-            // Update memory cache
-            await this.saveGuildConfigInMemory(guildId, configData);
+            if (this.isConnected && this.guildConfigsCollection) {
+                await this.guildConfigsCollection.replaceOne(
+                    { guildId },
+                    config,
+                    { upsert: true }
+                );
+            }
+            
+            // Always update memory
+            this.memoryConfigs.set(guildId, config);
             return true;
         } catch (error) {
-            Logger.error('Fehler beim Speichern der Guild-Config in MongoDB', error);
-            return await this.saveGuildConfigInMemory(guildId, configData);
-        }
-    }
-
-    private async saveGuildConfigInMemory(guildId: string, configData: Partial<GuildConfigDocument>): Promise<boolean> {
-        try {
-            const existingConfig = this.memoryConfigs.get(guildId) || this.getDefaultGuildConfig(guildId);
-            const updatedConfig = { ...existingConfig, ...configData, guildId } as GuildConfigDocument;
-            this.memoryConfigs.set(guildId, updatedConfig);
-            return true;
-        } catch (error) {
-            Logger.error('Fehler beim Speichern der Config im Memory', error);
+            Logger.error('Fehler beim Speichern der Guild-Konfiguration', error);
             return false;
         }
     }
 
-    // Advanced Database Operations
+    // Additional utility methods
+    public async loadGuildConfigFromDatabase(guildId: string): Promise<void> {
+        if (!this.isConnected || !this.guildConfigsCollection) return;
+
+        try {
+            const config = await this.guildConfigsCollection.findOne({ guildId });
+            if (config) {
+                this.memoryConfigs.set(guildId, config);
+            }
+        } catch (error) {
+            Logger.error('Fehler beim Laden der Guild-Konfiguration aus MongoDB', error);
+        }
+    }
+
+    public async cleanupOldChannels(maxAge: number = 86400000): Promise<number> {
+        try {
+            const cutoffTime = new Date(Date.now() - maxAge);
+            let cleanedCount = 0;
+
+            if (this.isConnected && this.tempChannelsCollection) {
+                const result = await this.tempChannelsCollection.deleteMany({
+                    lastActivity: { $lt: cutoffTime }
+                });
+                cleanedCount += result.deletedCount || 0;
+            }
+
+            // Also clean memory
+            for (const [guildId, guildChannels] of this.memoryChannels.entries()) {
+                for (const [channelId, channelData] of guildChannels.entries()) {
+                    const lastActivity = channelData.lastActivity || channelData.createdAt;
+                    if (lastActivity < cutoffTime) {
+                        guildChannels.delete(channelId);
+                        cleanedCount++;
+                    }
+                }
+                if (guildChannels.size === 0) {
+                    this.memoryChannels.delete(guildId);
+                }
+            }
+
+            return cleanedCount;
+        } catch (error) {
+            Logger.error('Fehler beim Cleanup alter Channels', error);
+            return 0;
+        }
+    }
+
     public async getDatabaseStats(): Promise<DatabaseStats> {
-        if (!this.isConnected || !this.db) {
+        try {
+            if (!this.isConnected || !this.db) {
+                return {
+                    totalDocuments: this.getTotalMemoryDocuments(),
+                    totalSize: 0,
+                    avgDocumentSize: 0,
+                    indexCount: 0,
+                    dataSize: 0,
+                    storageSize: 0
+                };
+            }
+
+            const tempChannelsStats = await this.db.collection('tempChannels').estimatedDocumentCount();
+            const guildConfigsStats = await this.db.collection('guildConfigs').estimatedDocumentCount();
+
+            // Note: stats() method doesn't exist on Collection type in newer MongoDB drivers
+            // We'll use available methods instead
+            
             return {
-                totalDocuments: this.memoryChannels.size,
+                totalDocuments: tempChannelsStats + guildConfigsStats,
+                totalSize: 0, // Would need admin access to get this
+                avgDocumentSize: 0, // Would need to calculate manually
+                indexCount: 0, // Would need to query listIndexes()
+                dataSize: 0, // Would need admin access
+                storageSize: 0 // Would need admin access
+            };
+        } catch (error) {
+            Logger.error('Fehler beim Abrufen der Datenbankstatistiken', error);
+            return {
+                totalDocuments: 0,
                 totalSize: 0,
                 avgDocumentSize: 0,
                 indexCount: 0,
@@ -381,146 +397,29 @@ export class MongoDBStorage extends TempVoiceCore {
                 storageSize: 0
             };
         }
-
-        try {
-            const tempChannelsStats = await this.db.collection('tempChannels').stats();
-            const guildConfigsStats = await this.db.collection('guildConfigs').stats();
-
-            return {
-                totalDocuments: tempChannelsStats.count + guildConfigsStats.count,
-                totalSize: tempChannelsStats.size + guildConfigsStats.size,
-                avgDocumentSize: tempChannelsStats.avgObjSize || 0,
-                indexCount: tempChannelsStats.nindexes + guildConfigsStats.nindexes,
-                dataSize: tempChannelsStats.size + guildConfigsStats.size,
-                storageSize: tempChannelsStats.storageSize + guildConfigsStats.storageSize
-            };
-        } catch (error) {
-            Logger.error('Fehler beim Abrufen der Datenbankstatistiken', error);
-            throw error;
-        }
     }
 
-    public async cleanupOldChannels(maxAge: number = 86400000): Promise<number> {
-        const cutoffDate = new Date(Date.now() - maxAge);
-        let cleanedCount = 0;
-
-        if (this.isConnected && this.tempChannelsCollection) {
-            try {
-                const result = await this.tempChannelsCollection.deleteMany({
-                    createdAt: { $lt: cutoffDate }
-                });
-                cleanedCount = result.deletedCount || 0;
-                Logger.info(`🧹 MongoDB: ${cleanedCount} alte Channels bereinigt`);
-            } catch (error) {
-                Logger.error('Fehler beim Bereinigen alter Channels in MongoDB', error);
-            }
+    private getTotalMemoryDocuments(): number {
+        let total = 0;
+        for (const guildChannels of this.memoryChannels.values()) {
+            total += guildChannels.size;
         }
-
-        // Also clean memory
-        for (const [guildId, guildChannels] of this.memoryChannels) {
-            for (const [channelId, channelData] of guildChannels) {
-                if (channelData.createdAt < cutoffDate) {
-                    guildChannels.delete(channelId);
-                    cleanedCount++;
-                }
-            }
-            if (guildChannels.size === 0) {
-                this.memoryChannels.delete(guildId);
-            }
-        }
-
-        return cleanedCount;
+        return total + this.memoryConfigs.size;
     }
 
-    public async getChannelsByOwner(guildId: string, ownerId: string): Promise<TempChannelDocument[]> {
-        if (this.isConnected && this.tempChannelsCollection) {
-            try {
-                return await this.tempChannelsCollection.find({ guildId, ownerId }).toArray();
-            } catch (error) {
-                Logger.error('Fehler beim Abrufen der Channels nach Owner', error);
-            }
+    // Health check
+    public isHealthy(): boolean {
+        if (this.isConnected) {
+            return this.mongoClient !== null && this.db !== null;
         }
-
-        // Fallback to memory
-        const guildChannels = this.memoryChannels.get(guildId);
-        if (!guildChannels) return [];
-
-        return Array.from(guildChannels.values()).filter(channel => channel.ownerId === ownerId);
+        return true; // Memory mode is always "healthy"
     }
 
-    public async updateChannelActivity(guildId: string, channelId: string, activity: ActivityLogEntry): Promise<void> {
-        if (this.isConnected && this.tempChannelsCollection) {
-            try {
-                await this.tempChannelsCollection.updateOne(
-                    { guildId, voiceChannelId: channelId },
-                    { 
-                        $push: { 
-                            activityLog: {
-                                $each: [activity],
-                                $slice: -50 // Keep only last 50 activities
-                            }
-                        },
-                        $set: { lastActivity: new Date() }
-                    }
-                );
-            } catch (error) {
-                Logger.error('Fehler beim Aktualisieren der Channel-Aktivität', error);
-            }
-        }
-
-        // Also update memory
-        const channelData = this.getTempChannel(guildId, channelId);
-        if (channelData) {
-            if (!channelData.activityLog) channelData.activityLog = [];
-            channelData.activityLog.push(activity);
-            if (channelData.activityLog.length > 50) {
-                channelData.activityLog = channelData.activityLog.slice(-50);
-            }
-            await this.setTempChannelInMemory(guildId, channelId, channelData);
-        }
-    }
-
-    // Cleanup and Shutdown
-    public async cleanup(): Promise<void> {
-        Logger.info('🧹 TempVoice MongoDB Storage wird bereinigt...');
-        
-        try {
-            // Clear memory
-            this.memoryChannels.clear();
-            this.memoryConfigs.clear();
-            
-            // Close MongoDB connection
-            if (this.client) {
-                await this.client.close();
-                this.isConnected = false;
-                Logger.info('📡 MongoDB-Verbindung geschlossen');
-            }
-        } catch (error) {
-            Logger.error('Fehler beim Cleanup des MongoDB Storage', error);
-        }
-    }
-
-    // Health Check
-    public async healthCheck(): Promise<{ status: string; details: any }> {
-        const details: any = {
-            memoryChannels: this.memoryChannels.size,
-            memoryConfigs: this.memoryConfigs.size,
-            mongoConnected: this.isConnected
+    public getConnectionInfo(): { connected: boolean; database: string; collections: number } {
+        return {
+            connected: this.isConnected,
+            database: this.databaseName,
+            collections: this.isConnected ? 2 : 0
         };
-
-        if (this.isConnected && this.db) {
-            try {
-                await this.db.admin().ping();
-                details.mongoPing = 'OK';
-                details.databaseName = this.databaseName;
-            } catch (error) {
-                details.mongoPing = 'FAILED';
-                details.error = error;
-                return { status: 'DEGRADED', details };
-            }
-        }
-
-        const status = this.isConnected ? 'HEALTHY' : 'MEMORY_ONLY';
-        return { status, details };
     }
 }
